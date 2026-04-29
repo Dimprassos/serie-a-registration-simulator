@@ -496,25 +496,31 @@ export default function App() {
   }
 
   function addBlankRow() {
-    const id = `manual-${selectedClub.slug}-${Date.now()}`;
-    updateSelectedPlayers((players) => [
-      ...players,
-      {
-        id,
-        name: "",
-        dateOfBirth: "",
-        position: "MF",
-        nationality: "",
-        isClubTrained: false,
-        isItalyTrained: false,
-        isNonEuOrEea: false,
-        fromAbroadThisWindow: false,
-        status: "not_registered",
-        sourceClub: "Manual",
-        needsReview: true,
-      },
-    ]);
-  }
+  const id = `manual-${selectedClub.slug}-${Date.now()}`;
+
+  const defaultPosition: Position =
+    positionFilter === "All" ? "MF" : positionFilter;
+
+  setSearch("");
+
+  updateSelectedPlayers((players) => [
+    ...players,
+    {
+      id,
+      name: "",
+      dateOfBirth: "",
+      position: defaultPosition,
+      nationality: "",
+      isClubTrained: false,
+      isItalyTrained: false,
+      isNonEuOrEea: false,
+      fromAbroadThisWindow: false,
+      status: "not_registered",
+      sourceClub: "Manual",
+      needsReview: true,
+    },
+  ]);
+}
 
   function addTransfer(player: Player) {
     updateSelectedPlayers((players) => [
