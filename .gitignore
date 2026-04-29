@@ -1,0 +1,12 @@
+node_modules
+.next
+out
+dist
+dist-electron
+release
+*.log
+.env
+.env.local
+*.zip
+*.exe
+*.msi
