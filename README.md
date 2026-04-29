@@ -125,19 +125,6 @@ dist-electron/
 
 If the build fails with an `EBUSY` error, close any running app window and delete the previous `dist-electron` folder before rebuilding.
 
-## Deployment
-
-This project can be deployed as a static Vite app.
-
-Recommended Vercel settings:
-
-```txt
-Framework Preset: Vite
-Build Command: npm run build
-Output Directory: dist
-Install Command: npm install
-```
-
 ## Security
 
 The deployed app uses security headers including:
@@ -174,16 +161,3 @@ The registration checks are intended as a planning aid only.
 They should not be treated as official legal, sporting, or regulatory advice.
 
 Always verify final squad registration decisions with official league and club sources.
-
-## Roadmap
-
-Potential future improvements:
-
-- Better mobile layout
-- Team logos
-- Saved squad scenarios
-- Export lineup image
-- Export squad sheet as CSV
-- More accurate player eligibility database
-- Licensed football data provider integration
-- Custom backend for scheduled data refreshes
