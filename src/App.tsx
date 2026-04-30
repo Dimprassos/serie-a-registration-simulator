@@ -1,10 +1,10 @@
-import React, { useMemo, useState } from "react";
-import big5Snapshot from "./data/big5-latest.json";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import playerSnapshot from "./data/big5-latest.json";
 
 type Position = "GK" | "DF" | "MF" | "FW";
 type RegistrationStatus = "registered" | "not_registered";
 type Category = "U23" | "Club" | "Italy" | "Non-HG" | "Review";
-type ActiveTab = "sheet" | "lineup";
+type ActiveTab = "sheet" | "lineup" | "overview";
 
 type Player = {
   id: string;
@@ -18,6 +18,7 @@ type Player = {
   fromAbroadThisWindow: boolean;
   status: RegistrationStatus;
   sourceClub: string;
+  sourceLeague?: string;
   needsReview?: boolean;
 };
 
@@ -29,7 +30,7 @@ type CatalogPlayer = {
   nationality: string;
   nationalityCode?: string;
   currentClub: string;
-  currentLeague: "Serie A" | "Premier League" | "LaLiga" | "Bundesliga" | "Ligue 1";
+  currentLeague?: string;
   sourceClub?: string;
   sourceLeague?: string;
   isClubTrained?: boolean;
@@ -40,13 +41,17 @@ type CatalogPlayer = {
   needsDobReview?: boolean;
 };
 
-type Big5Snapshot = {
+type PlayerCatalogSnapshot = {
   players: CatalogPlayer[];
   report?: {
+    source?: string;
     importedAt?: string;
     playerCount?: number;
     teamCount?: number;
     serieAPlayerCount?: number;
+    competitionCount?: number;
+    leagueCount?: number;
+    competitionCodes?: string[];
     warnings?: string[];
   };
 };
@@ -81,8 +86,55 @@ type ValidationResult = {
   };
 };
 
+type LineupPlayer = { player: Player; placement: LineupPlacement };
+type SortKey = "status" | "name" | "position" | "dateOfBirth" | "age" | "nationality" | "category" | "sourceClub";
+type SortDirection = "asc" | "desc";
+type QuickView = "all" | "registered" | "issues" | "additions";
+type TransferLeagueFilter = string;
+
+type SavedWorkbook = {
+  version: number;
+  clubs: Club[];
+  lineups: Record<string, Record<string, LineupPlacement>>;
+  selectedSlug: string;
+  exportedAt?: string;
+};
+
 const SEASON_START_YEAR = 2026;
-const DATA_SNAPSHOT = big5Snapshot as Big5Snapshot;
+const STORAGE_KEY = "serie-a-registration-workbook:v2";
+const DATA_SNAPSHOT = playerSnapshot as PlayerCatalogSnapshot;
+
+const POSITION_ORDER: Record<Position, number> = { GK: 0, DF: 1, MF: 2, FW: 3 };
+const DEFAULT_LEAGUE_ORDER = [
+  "Serie A",
+  "Premier League",
+  "LaLiga",
+  "Bundesliga",
+  "Ligue 1",
+  "Primeira Liga",
+  "Eredivisie",
+  "Brazil Serie A",
+  "Liga Profesional",
+  "MLS",
+  "Jupiler Pro League",
+  "Turkish Super Lig",
+  "Swiss Super League",
+  "Austrian Bundesliga",
+  "Danish Superliga",
+  "Scottish Premiership",
+  "J. League",
+  "Liga MX",
+  "Greek Super League",
+  "A-League",
+];
+const DATA_LEAGUES = buildLeagueList(DATA_SNAPSHOT.players);
+const TRANSFER_LEAGUES: TransferLeagueFilter[] = ["All", ...DATA_LEAGUES];
+const QUICK_VIEWS: Array<{ value: QuickView; label: string }> = [
+  { value: "all", label: "All rows" },
+  { value: "registered", label: "REG only" },
+  { value: "issues", label: "Issues" },
+  { value: "additions", label: "Added" },
+];
 
 const CLUB_META = [
   ["atalanta", "Atalanta", "ATA", "Bergamo"],
@@ -209,9 +261,16 @@ const FEATURED_PLAYERS: Record<string, Array<Omit<Player, "id" | "status" | "sou
 
 const TRANSFER_POOL: Player[] = buildTransferPool();
 
+function buildLeagueList(players: CatalogPlayer[]): string[] {
+  const leagues = Array.from(new Set(players.map((player) => player.currentLeague || player.sourceLeague).filter(Boolean) as string[]));
+  const preferred = DEFAULT_LEAGUE_ORDER.filter((league) => leagues.includes(league));
+  const remaining = leagues.filter((league) => !DEFAULT_LEAGUE_ORDER.includes(league)).sort((a, b) => a.localeCompare(b));
+  return [...preferred, ...remaining];
+}
+
 function catalogPlayerToPlayer(player: CatalogPlayer, status: RegistrationStatus = "registered"): Player {
   const sourceClub = player.currentClub || player.sourceClub || "Unknown club";
-  const sourceLeague = player.currentLeague;
+  const sourceLeague = player.currentLeague || player.sourceLeague || "Unknown league";
   const nationality = player.nationality || player.nationalityCode || "Unknown";
   const isImportedFromAbroad = sourceLeague !== "Serie A";
 
@@ -229,6 +288,7 @@ function catalogPlayerToPlayer(player: CatalogPlayer, status: RegistrationStatus
     fromAbroadThisWindow: isImportedFromAbroad,
     status,
     sourceClub,
+    sourceLeague,
     // Do not mark every FBref row as Review. Review is reserved for manual rows
     // and incoming transfer additions where eligibility should be checked.
     needsReview: false,
@@ -393,17 +453,24 @@ function StatusCell({ ok }: { ok: boolean }) {
   return <span className={`inline-flex rounded px-2 py-1 text-xs font-bold ${ok ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{ok ? "OK" : "CHECK"}</span>;
 }
 
-function Metric({ label, value, danger = false }: { label: string; value: string; danger?: boolean }) {
+function Metric({ label, value, danger = false, progress }: { label: string; value: string; danger?: boolean; progress?: number }) {
+  const normalizedProgress = typeof progress === "number" ? clamp(progress, 0, 100) : undefined;
+
   return (
     <div className={`border-r border-slate-200 px-4 py-3 last:border-r-0 ${danger ? "bg-amber-50" : "bg-white"}`}>
       <div className="text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">{label}</div>
       <div className={`mt-1 text-lg font-black ${danger ? "text-amber-800" : "text-slate-950"}`}>{value}</div>
+      {normalizedProgress !== undefined && (
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+          <div className={`h-full rounded-full ${danger ? "bg-amber-500" : "bg-emerald-600"}`} style={{ width: `${normalizedProgress}%` }} />
+        </div>
+      )}
     </div>
   );
 }
 
 function CheckboxCell({ checked, onChange, title }: { checked: boolean; onChange: (checked: boolean) => void; title?: string }) {
-  return <input title={title} type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 cursor-pointer rounded border-slate-300" />;
+  return <input title={title} type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300" />;
 }
 
 function RegistrationToggle({ value, onChange }: { value: RegistrationStatus; onChange: (value: RegistrationStatus) => void }) {
@@ -429,16 +496,280 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function getPlayerInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
+
+function isBrowserStorageAvailable() {
+  try {
+    return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+  } catch {
+    return false;
+  }
+}
+
+function loadSavedWorkbook(): SavedWorkbook | null {
+  if (!isBrowserStorageAvailable()) return null;
+
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as Partial<SavedWorkbook>;
+    if (parsed.version !== 2 || !Array.isArray(parsed.clubs) || parsed.clubs.length === 0 || !parsed.lineups || !parsed.selectedSlug) return null;
+
+    return {
+      version: 2,
+      clubs: parsed.clubs,
+      lineups: parsed.lineups,
+      selectedSlug: parsed.selectedSlug,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveWorkbook(workbook: SavedWorkbook) {
+  if (!isBrowserStorageAvailable()) return false;
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(workbook));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function clearSavedWorkbook() {
+  if (!isBrowserStorageAvailable()) return;
+  window.localStorage.removeItem(STORAGE_KEY);
+}
+
+function slugifyFileName(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "squad";
+}
+
+function escapeCsvCell(value: string | number | boolean | undefined) {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function escapeHtml(value: string | number | boolean | undefined) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function escapeXml(value: string | number | boolean | undefined) {
+  return escapeHtml(value).replace(/'/g, "&apos;");
+}
+
+function downloadTextFile(fileName: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getExportRows(players: Player[]) {
+  return players.map((player) => {
+    const category = getCategory(player).label;
+    return [
+      player.status === "registered" ? "REG" : "OUT",
+      player.name,
+      player.position,
+      player.dateOfBirth,
+      getAge(player.dateOfBirth),
+      player.nationality,
+      player.isClubTrained ? "Yes" : "No",
+      player.isItalyTrained ? "Yes" : "No",
+      player.isNonEuOrEea ? "Yes" : "No",
+      player.fromAbroadThisWindow ? "Yes" : "No",
+      player.needsReview ? "Yes" : "No",
+      category,
+      player.sourceClub,
+    ];
+  });
+}
+
+function exportSquadCsv(club: Club) {
+  const headers = ["Status", "Player", "Pos", "DOB", "Age", "Nationality", "Club-trained", "Italy-trained", "Non-EU", "From abroad", "Review", "Category", "Source"];
+  const rows = [headers, ...getExportRows(club.players)];
+  const csv = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\r\n");
+  downloadTextFile(`${slugifyFileName(club.name)}-squad.csv`, csv, "text/csv;charset=utf-8");
+}
+
+function exportSquadExcel(club: Club) {
+  const headers = ["Status", "Player", "Pos", "DOB", "Age", "Nationality", "Club-trained", "Italy-trained", "Non-EU", "From abroad", "Review", "Category", "Source"];
+  const rows = getExportRows(club.players);
+  const tableRows = [
+    `<tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr>`,
+    ...rows.map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`),
+  ].join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>table{border-collapse:collapse;font-family:Arial,sans-serif;font-size:12px}th,td{border:1px solid #94a3b8;padding:5px 8px}th{background:#e2e8f0}</style></head><body><table>${tableRows}</table></body></html>`;
+  downloadTextFile(`${slugifyFileName(club.name)}-squad.xls`, html, "application/vnd.ms-excel;charset=utf-8");
+}
+
+function exportWorkbookJson(workbook: SavedWorkbook) {
+  downloadTextFile(
+    `serie-a-registration-workbook-${new Date().toISOString().slice(0, 10)}.json`,
+    JSON.stringify({ ...workbook, exportedAt: new Date().toISOString() }, null, 2),
+    "application/json;charset=utf-8"
+  );
+}
+
+function isValidSavedWorkbook(value: unknown): value is SavedWorkbook {
+  if (!value || typeof value !== "object") return false;
+  const workbook = value as Partial<SavedWorkbook>;
+  return (
+    workbook.version === 2 &&
+    Array.isArray(workbook.clubs) &&
+    workbook.clubs.length > 0 &&
+    typeof workbook.selectedSlug === "string" &&
+    typeof workbook.lineups === "object" &&
+    workbook.lineups !== null
+  );
+}
+
+function getCategorySvgColors(category: Category) {
+  if (category === "Club") return { fill: "#e0f2fe", stroke: "#0284c7", text: "#0c4a6e" };
+  if (category === "Italy") return { fill: "#eef2ff", stroke: "#4f46e5", text: "#312e81" };
+  if (category === "U23") return { fill: "#dcfce7", stroke: "#16a34a", text: "#14532d" };
+  if (category === "Review") return { fill: "#fef3c7", stroke: "#d97706", text: "#78350f" };
+  return { fill: "#f8fafc", stroke: "#64748b", text: "#1e293b" };
+}
+
+function exportLineupSvg(club: Club, lineupPlayers: LineupPlayer[]) {
+  const width = 900;
+  const height = 1200;
+  const playerCards = lineupPlayers.map(({ player, placement }) => {
+    const category = getCategory(player).label;
+    const colors = getCategorySvgColors(category);
+    const cardWidth = 178;
+    const cardHeight = 54;
+    const x = clamp((placement.x / 100) * width - cardWidth / 2, 24, width - cardWidth - 24);
+    const y = clamp((placement.y / 100) * height - cardHeight / 2, 24, height - cardHeight - 24);
+    return `
+      <g>
+        <rect x="${x}" y="${y}" width="${cardWidth}" height="${cardHeight}" rx="12" fill="${colors.fill}" stroke="${colors.stroke}" stroke-width="3"/>
+        <text x="${x + cardWidth / 2}" y="${y + 23}" text-anchor="middle" font-family="Arial, sans-serif" font-size="17" font-weight="700" fill="${colors.text}">${escapeXml(player.name)}</text>
+        <text x="${x + cardWidth / 2}" y="${y + 42}" text-anchor="middle" font-family="Arial, sans-serif" font-size="12" font-weight="700" fill="${colors.text}" opacity="0.72">${player.position} - ${category}</text>
+      </g>`;
+  }).join("");
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    <defs>
+      <linearGradient id="grass" x1="0" x2="1">
+        <stop offset="0" stop-color="#047857"/>
+        <stop offset="1" stop-color="#065f46"/>
+      </linearGradient>
+      <pattern id="stripes" width="180" height="1200" patternUnits="userSpaceOnUse">
+        <rect width="90" height="1200" fill="#ffffff" fill-opacity="0.08"/>
+      </pattern>
+    </defs>
+    <rect width="${width}" height="${height}" fill="url(#grass)"/>
+    <rect width="${width}" height="${height}" fill="url(#stripes)"/>
+    <rect x="40" y="40" width="${width - 80}" height="${height - 80}" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="5"/>
+    <line x1="40" y1="${height / 2}" x2="${width - 40}" y2="${height / 2}" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4"/>
+    <circle cx="${width / 2}" cy="${height / 2}" r="100" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4"/>
+    <rect x="${width / 2 - 150}" y="40" width="300" height="170" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4"/>
+    <rect x="${width / 2 - 150}" y="${height - 210}" width="300" height="170" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="4"/>
+    <text x="52" y="92" font-family="Arial, sans-serif" font-size="30" font-weight="800" fill="#ffffff" fill-opacity="0.78">${escapeXml(club.name)}</text>
+    ${playerCards}
+  </svg>`;
+
+  downloadTextFile(`${slugifyFileName(club.name)}-lineup.svg`, svg, "image/svg+xml;charset=utf-8");
+}
+
+function isWorkbookAddition(player: Player, club: Club) {
+  return player.sourceClub !== club.name && player.sourceClub !== "Current squad";
+}
+
+function getPlayerRowClass(player: Player, index: number) {
+  if (isIncompleteRegistered(player)) return "bg-red-50";
+  if (player.needsReview) return "bg-amber-50";
+  if (player.status === "not_registered") return "bg-slate-100 text-slate-500";
+  return index % 2 === 0 ? "bg-white" : "bg-slate-50";
+}
+
+function getSortValue(player: Player, sortKey: SortKey) {
+  if (sortKey === "status") return player.status;
+  if (sortKey === "name") return player.name.toLowerCase();
+  if (sortKey === "position") return POSITION_ORDER[player.position];
+  if (sortKey === "dateOfBirth") return player.dateOfBirth || "9999-99-99";
+  if (sortKey === "age") return Number(getAge(player.dateOfBirth)) || 999;
+  if (sortKey === "nationality") return player.nationality.toLowerCase();
+  if (sortKey === "category") return getCategory(player).label;
+  return player.sourceClub.toLowerCase();
+}
+
+function sortPlayers(players: Player[], sortKey: SortKey, direction: SortDirection) {
+  return [...players].sort((a, b) => {
+    const aValue = getSortValue(a, sortKey);
+    const bValue = getSortValue(b, sortKey);
+    const result = typeof aValue === "number" && typeof bValue === "number"
+      ? aValue - bValue
+      : String(aValue).localeCompare(String(bValue));
+
+    if (result !== 0) return direction === "asc" ? result : -result;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function getPositionCounts(players: Player[]) {
+  return players.reduce<Record<Position, number>>((counts, player) => {
+    counts[player.position] += 1;
+    return counts;
+  }, { GK: 0, DF: 0, MF: 0, FW: 0 });
+}
+
+function getAverageAge(players: Player[]) {
+  const ages = players.map((player) => Number(getAge(player.dateOfBirth))).filter((age) => Number.isFinite(age));
+  if (ages.length === 0) return "-";
+  return (ages.reduce((total, age) => total + age, 0) / ages.length).toFixed(1);
+}
+
+function getDuplicateNames(players: Player[]) {
+  const counts = new Map<string, number>();
+  players.forEach((player) => {
+    const name = player.name.trim().toLowerCase();
+    if (name) counts.set(name, (counts.get(name) ?? 0) + 1);
+  });
+
+  return Array.from(counts.entries()).filter(([, count]) => count > 1).length;
+}
+
 export default function App() {
-  const [clubs, setClubs] = useState<Club[]>(buildClubs());
-  const [selectedSlug, setSelectedSlug] = useState("inter");
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+  const [initialWorkbook] = useState(() => loadSavedWorkbook());
+  const [clubs, setClubs] = useState<Club[]>(() => initialWorkbook?.clubs ?? buildClubs());
+  const [selectedSlug, setSelectedSlug] = useState(() => initialWorkbook?.selectedSlug ?? "inter");
   const [activeTab, setActiveTab] = useState<ActiveTab>("sheet");
   const [search, setSearch] = useState("");
   const [positionFilter, setPositionFilter] = useState<"All" | Position>("All");
   const [categoryFilter, setCategoryFilter] = useState<"All" | Category>("All");
+  const [quickView, setQuickView] = useState<QuickView>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("position");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [selectedPlayerIds, setSelectedPlayerIds] = useState<string[]>([]);
   const [transferSearch, setTransferSearch] = useState("");
-  const [lineups, setLineups] = useState<Record<string, Record<string, LineupPlacement>>>({});
+  const [transferLeagueFilter, setTransferLeagueFilter] = useState<TransferLeagueFilter>("All");
+  const [lineups, setLineups] = useState<Record<string, Record<string, LineupPlacement>>>(() => initialWorkbook?.lineups ?? {});
   const [draggingPlayerId, setDraggingPlayerId] = useState<string | null>(null);
+  const [isTransferPanelOpen, setIsTransferPanelOpen] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(() => (initialWorkbook ? "Restored saved workbook" : "Autosave ready"));
+  const [lineupSearch, setLineupSearch] = useState("");
+  const [benchPositionFilter, setBenchPositionFilter] = useState<"All" | Position>("All");
 
   const selectedClub = clubs.find((club) => club.slug === selectedSlug) ?? clubs[0];
   const validation = useMemo(() => validateSerieAList(selectedClub.players), [selectedClub.players]);
@@ -457,19 +788,146 @@ export default function App() {
 
   const filteredPlayers = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return selectedClub.players.filter((player) => {
+    const rows = selectedClub.players.filter((player) => {
       const category = getCategory(player).label;
-      const matchesText = !q || `${player.name} ${player.nationality} ${player.position} ${category}`.toLowerCase().includes(q);
+      const matchesText = !q || `${player.name} ${player.nationality} ${player.position} ${category} ${player.sourceClub}`.toLowerCase().includes(q);
       const matchesPosition = positionFilter === "All" || player.position === positionFilter;
       const matchesCategory = categoryFilter === "All" || category === categoryFilter;
-      return matchesText && matchesPosition && matchesCategory;
+      const matchesQuickView =
+        quickView === "all" ||
+        (quickView === "registered" && player.status === "registered") ||
+        (quickView === "issues" && (player.needsReview || isIncompleteRegistered(player))) ||
+        (quickView === "additions" && isWorkbookAddition(player, selectedClub));
+      return matchesText && matchesPosition && matchesCategory && matchesQuickView;
     });
-  }, [selectedClub.players, search, positionFilter, categoryFilter]);
+
+    return sortPlayers(rows, sortKey, sortDirection);
+  }, [selectedClub, search, positionFilter, categoryFilter, quickView, sortKey, sortDirection]);
+
+  const selectedPlayers = useMemo(() => selectedClub.players.filter((player) => selectedPlayerIds.includes(player.id)), [selectedClub.players, selectedPlayerIds]);
+  const allFilteredSelected = filteredPlayers.length > 0 && filteredPlayers.every((player) => selectedPlayerIds.includes(player.id));
+  const squadPositionCounts = useMemo(() => getPositionCounts(selectedClub.players.filter((player) => player.status === "registered")), [selectedClub.players]);
+  const averageAge = useMemo(() => getAverageAge(selectedClub.players.filter((player) => player.status === "registered")), [selectedClub.players]);
+  const duplicateNameCount = useMemo(() => getDuplicateNames(selectedClub.players), [selectedClub.players]);
+
+  const visibleBenchPlayers = useMemo(() => {
+    const q = lineupSearch.trim().toLowerCase();
+    return availableLineupPlayers.filter((player) => {
+      const category = getCategory(player).label;
+      const matchesText = !q || `${player.name} ${player.position} ${player.nationality} ${category}`.toLowerCase().includes(q);
+      const matchesPosition = benchPositionFilter === "All" || player.position === benchPositionFilter;
+      return matchesText && matchesPosition;
+    });
+  }, [availableLineupPlayers, lineupSearch, benchPositionFilter]);
 
   const filteredTransfers = useMemo(() => {
     const q = transferSearch.trim().toLowerCase();
-    return TRANSFER_POOL.filter((player) => player.sourceClub !== selectedClub.name).filter((player) => !q || `${player.name} ${player.sourceClub} ${player.nationality} ${player.position}`.toLowerCase().includes(q)).slice(0, 200);
-  }, [transferSearch, selectedClub.name]);
+    const currentSheetKeys = new Set(selectedClub.players.map((player) => `${player.name.trim().toLowerCase()}|${player.dateOfBirth}`));
+
+    return TRANSFER_POOL
+      .filter((player) => !currentSheetKeys.has(`${player.name.trim().toLowerCase()}|${player.dateOfBirth}`))
+      .filter((player) => transferLeagueFilter === "All" || player.sourceLeague === transferLeagueFilter)
+      .filter((player) => !q || `${player.name} ${player.sourceClub} ${player.sourceLeague ?? ""} ${player.nationality} ${player.position}`.toLowerCase().includes(q));
+  }, [transferSearch, transferLeagueFilter, selectedClub.players]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      const saved = saveWorkbook({ version: 2, clubs, lineups, selectedSlug });
+      setSaveStatus(saved ? `Autosaved ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Autosave unavailable");
+    }, 250);
+
+    return () => window.clearTimeout(timeout);
+  }, [clubs, lineups, selectedSlug]);
+
+  useEffect(() => {
+    if (!isTransferPanelOpen) return undefined;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setIsTransferPanelOpen(false);
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isTransferPanelOpen]);
+
+  useEffect(() => {
+    setSelectedPlayerIds((current) => current.filter((id) => selectedClub.players.some((player) => player.id === id)));
+  }, [selectedClub.players]);
+
+  function toggleSort(nextSortKey: SortKey) {
+    if (sortKey === nextSortKey) {
+      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(nextSortKey);
+    setSortDirection("asc");
+  }
+
+  function togglePlayerSelection(playerId: string) {
+    setSelectedPlayerIds((current) => current.includes(playerId) ? current.filter((id) => id !== playerId) : [...current, playerId]);
+  }
+
+  function toggleFilteredSelection() {
+    setSelectedPlayerIds((current) => {
+      if (allFilteredSelected) {
+        const filteredIds = new Set(filteredPlayers.map((player) => player.id));
+        return current.filter((id) => !filteredIds.has(id));
+      }
+
+      return Array.from(new Set([...current, ...filteredPlayers.map((player) => player.id)]));
+    });
+  }
+
+  function bulkPatchSelected(patch: Partial<Player>) {
+    const selectedIds = new Set(selectedPlayerIds);
+    updateSelectedPlayers((players) => players.map((player) => selectedIds.has(player.id) ? { ...player, ...patch } : player));
+
+    if (patch.status === "not_registered") {
+      selectedPlayerIds.forEach(removeFromLineup);
+    }
+  }
+
+  function deleteSelectedPlayers() {
+    if (selectedPlayerIds.length === 0) return;
+    if (typeof window !== "undefined" && !window.confirm(`Delete ${selectedPlayerIds.length} selected player rows?`)) return;
+
+    const selectedIds = new Set(selectedPlayerIds);
+    updateSelectedPlayers((players) => players.filter((player) => !selectedIds.has(player.id)));
+    selectedPlayerIds.forEach(removeFromLineup);
+    setSelectedPlayerIds([]);
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setPositionFilter("All");
+    setCategoryFilter("All");
+    setQuickView("all");
+  }
+
+  async function importWorkbookFile(file: File) {
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (!isValidSavedWorkbook(parsed)) {
+        window.alert("This file is not a valid Serie A Registration Workbook backup.");
+        return;
+      }
+
+      setClubs(parsed.clubs);
+      setLineups(parsed.lineups);
+      setSelectedSlug(parsed.clubs.some((club) => club.slug === parsed.selectedSlug) ? parsed.selectedSlug : parsed.clubs[0].slug);
+      setSelectedPlayerIds([]);
+      setSearch("");
+      setPositionFilter("All");
+      setCategoryFilter("All");
+      setQuickView("all");
+      setSaveStatus("Imported workbook backup");
+    } catch {
+      window.alert("Could not read that backup file.");
+    } finally {
+      if (importFileInputRef.current) importFileInputRef.current.value = "";
+    }
+  }
 
   function updateSelectedPlayers(updater: (players: Player[]) => Player[]) {
     setClubs((current) => current.map((club) => (club.slug === selectedClub.slug ? { ...club, players: updater(club.players) } : club)));
@@ -571,6 +1029,22 @@ export default function App() {
     setLineups((current) => ({ ...current, [selectedClub.slug]: {} }));
   }
 
+  function resetWorkbook() {
+    if (typeof window !== "undefined" && !window.confirm("Reset all saved edits and return every club to the original imported workbook?")) return;
+
+    setClubs(buildClubs());
+    setSelectedSlug("inter");
+    setSearch("");
+    setPositionFilter("All");
+    setCategoryFilter("All");
+    setTransferSearch("");
+    setTransferLeagueFilter("All");
+    setLineups({});
+    setIsTransferPanelOpen(false);
+    clearSavedWorkbook();
+    setSaveStatus("Reset to original data");
+  }
+
   return (
     <div className="min-h-screen bg-[#eef2f5] text-slate-950">
       <header className="sticky top-0 z-50 border-b border-slate-300 bg-[#107c41] text-white shadow-sm">
@@ -585,10 +1059,13 @@ export default function App() {
             <div className="grid h-8 w-8 place-items-center rounded bg-white/15 text-xs font-black">SA</div>
             <div>
               <div className="text-sm font-black leading-4">Serie A Registration Workbook</div>
-              <div className="text-[11px] text-white/75">Excel-style squad planning · Big 5 snapshot loaded</div>
+              <div className="text-[11px] text-white/75">Excel-style squad planning · {TRANSFER_POOL.length.toLocaleString()} players · {DATA_LEAGUES.length} leagues</div>
             </div>
           </div>
-          <div className="hidden text-xs font-bold text-white/80 sm:block">Summer Window · 2026/27</div>
+          <div className="hidden text-right text-xs font-bold text-white/80 sm:block">
+            <div>Summer Window · 2026/27</div>
+            <div className="text-[10px] text-white/65">{saveStatus}</div>
+          </div>
         </div>
       </header>
 
@@ -633,22 +1110,56 @@ export default function App() {
                 <option value="Review">Review</option>
               </select>
             </div>
+            <div>
+              <label className="mb-1 block text-[11px] font-black uppercase tracking-wide text-slate-500">Quick view</label>
+              <div className="flex h-9 border border-slate-300 bg-white">
+                {QUICK_VIEWS.map((view) => (
+                  <button
+                    key={view.value}
+                    type="button"
+                    onClick={() => setQuickView(view.value)}
+                    className={`border-r border-slate-300 px-2.5 text-xs font-black last:border-r-0 ${quickView === view.value ? "bg-green-700 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                  >
+                    {view.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-end gap-2 lg:ml-auto">
+              <button type="button" onClick={() => setIsTransferPanelOpen(true)} className="h-9 border border-green-700 bg-green-700 px-3 text-xs font-black text-white hover:bg-green-800">Player pool</button>
+              <button type="button" onClick={() => exportSquadCsv(selectedClub)} className="h-9 border border-slate-300 bg-white px-3 text-xs font-black text-slate-700 hover:bg-slate-50">CSV</button>
+              <button type="button" onClick={() => exportSquadExcel(selectedClub)} className="h-9 border border-slate-300 bg-white px-3 text-xs font-black text-slate-700 hover:bg-slate-50">Excel</button>
+              <button type="button" onClick={() => exportWorkbookJson({ version: 2, clubs, lineups, selectedSlug })} className="h-9 border border-slate-300 bg-white px-3 text-xs font-black text-slate-700 hover:bg-slate-50">Backup</button>
+              <button type="button" onClick={() => importFileInputRef.current?.click()} className="h-9 border border-slate-300 bg-white px-3 text-xs font-black text-slate-700 hover:bg-slate-50">Import</button>
+              <button type="button" onClick={resetWorkbook} className="h-9 border border-red-200 bg-red-50 px-3 text-xs font-black text-red-700 hover:bg-red-100">Reset</button>
+            </div>
           </div>
+          <input
+            ref={importFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void importWorkbookFile(file);
+            }}
+          />
 
           <div className="flex border-b border-slate-300 bg-white">
             <button onClick={() => setActiveTab("sheet")} className={`border-r border-slate-300 px-5 py-2 text-sm font-black ${activeTab === "sheet" ? "bg-white text-green-800" : "bg-slate-100 text-slate-500 hover:bg-slate-50"}`}>Sheet</button>
             <button onClick={() => setActiveTab("lineup")} className={`border-r border-slate-300 px-5 py-2 text-sm font-black ${activeTab === "lineup" ? "bg-white text-green-800" : "bg-slate-100 text-slate-500 hover:bg-slate-50"}`}>Lineup Board</button>
+            <button onClick={() => setActiveTab("overview")} className={`border-r border-slate-300 px-5 py-2 text-sm font-black ${activeTab === "overview" ? "bg-white text-green-800" : "bg-slate-100 text-slate-500 hover:bg-slate-50"}`}>League Overview</button>
           </div>
 
           <div className="grid grid-cols-2 border-b border-slate-300 md:grid-cols-4 xl:grid-cols-8">
             <Metric label="Club" value={selectedClub.shortName} />
             <Metric label="Rows" value={`${filteredPlayers.length}`} />
-            <Metric label="Registered" value={`${validation.counts.registered}`} />
-            <Metric label="Senior" value={`${validation.counts.senior}/25`} danger={validation.counts.senior > 25} />
+            <Metric label="Registered" value={`${validation.counts.registered}`} progress={(validation.counts.registered / 25) * 100} />
+            <Metric label="Senior" value={`${validation.counts.senior}/25`} danger={validation.counts.senior > 25} progress={(validation.counts.senior / 25) * 100} />
             <Metric label="U23" value={`${validation.counts.u23}`} />
-            <Metric label="Non-HG" value={`${validation.counts.nonHomegrown}/17`} danger={validation.counts.nonHomegrown > 17} />
-            <Metric label="Club Trained" value={`${validation.counts.clubTrained}/4`} danger={validation.counts.clubTrained < 4} />
-            <Metric label="Italy Trained" value={`${validation.counts.italyTrained}/8`} danger={validation.counts.italyTrained < 8} />
+            <Metric label="Non-HG" value={`${validation.counts.nonHomegrown}/17`} danger={validation.counts.nonHomegrown > 17} progress={(validation.counts.nonHomegrown / 17) * 100} />
+            <Metric label="Club Trained" value={`${validation.counts.clubTrained}/4`} danger={validation.counts.clubTrained < 4} progress={(validation.counts.clubTrained / 4) * 100} />
+            <Metric label="Italy Trained" value={`${validation.counts.italyTrained}/8`} danger={validation.counts.italyTrained < 8} progress={(validation.counts.italyTrained / 8) * 100} />
           </div>
         </section>
 
@@ -660,68 +1171,134 @@ export default function App() {
                 <StatusCell ok={validation.ok} />
               </div>
 
-              <div className="max-h-[calc(100vh-318px)] overflow-auto">
-                <table className="min-w-[1380px] w-full border-collapse text-sm">
-                  <thead className="sticky top-0 z-20 bg-slate-200 text-[11px] font-black uppercase tracking-wide text-slate-600">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-white px-3 py-2 text-xs">
+                <div className="font-bold text-slate-600">
+                  {filteredPlayers.length} visible · {selectedPlayerIds.length} selected · sorted by {sortKey} {sortDirection}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={clearFilters} className="border border-slate-300 bg-white px-2 py-1 font-black text-slate-700 hover:bg-slate-50">Clear filters</button>
+                  <button type="button" onClick={() => bulkPatchSelected({ status: "registered" })} disabled={selectedPlayerIds.length === 0} className="border border-emerald-200 bg-emerald-50 px-2 py-1 font-black text-emerald-800 hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-40">Mark REG</button>
+                  <button type="button" onClick={() => bulkPatchSelected({ status: "not_registered" })} disabled={selectedPlayerIds.length === 0} className="border border-slate-300 bg-slate-50 px-2 py-1 font-black text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40">Mark OUT</button>
+                  <button type="button" onClick={() => bulkPatchSelected({ needsReview: false })} disabled={selectedPlayerIds.length === 0} className="border border-amber-200 bg-amber-50 px-2 py-1 font-black text-amber-800 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40">Clear review</button>
+                  <button type="button" onClick={deleteSelectedPlayers} disabled={selectedPlayerIds.length === 0} className="border border-red-200 bg-red-50 px-2 py-1 font-black text-red-700 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-40">Delete selected</button>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-slate-50 px-3 py-2 text-[11px]">
+                  <label className="inline-flex items-center gap-2 rounded border border-slate-300 bg-white px-2 py-1 font-black text-slate-700">
+                    <input title="Select all visible rows" type="checkbox" checked={allFilteredSelected} onChange={toggleFilteredSelection} className="h-4 w-4 cursor-pointer rounded border-slate-300" />
+                    Select visible
+                  </label>
+                  <span className="font-black uppercase tracking-wide text-slate-400">Sort</span>
+                  {[
+                    { value: "status" as SortKey, label: "REG" },
+                    { value: "name" as SortKey, label: "Player" },
+                    { value: "position" as SortKey, label: "Pos" },
+                    { value: "dateOfBirth" as SortKey, label: "DOB" },
+                    { value: "age" as SortKey, label: "Age" },
+                    { value: "nationality" as SortKey, label: "Nation" },
+                    { value: "category" as SortKey, label: "Category" },
+                    { value: "sourceClub" as SortKey, label: "Source" },
+                  ].map((item) => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() => toggleSort(item.value)}
+                      className={`rounded-full border px-2.5 py-1 font-black ${sortKey === item.value ? "border-green-700 bg-green-700 text-white" : "border-slate-300 bg-white text-slate-600 hover:bg-slate-100"}`}
+                    >
+                      {item.label} {sortKey === item.value ? (sortDirection === "asc" ? "▲" : "▼") : ""}
+                    </button>
+                  ))}
+                </div>
+
+                <table className="w-full table-fixed border-collapse text-[11px]">
+                  <colgroup>
+                    <col className="w-[4.2%]" />
+                    <col className="w-[6.5%]" />
+                    <col className="w-[19%]" />
+                    <col className="w-[5.4%]" />
+                    <col className="w-[10.8%]" />
+                    <col className="w-[4.2%]" />
+                    <col className="w-[10.2%]" />
+                    <col className="w-[15.7%]" />
+                    <col className="w-[8.2%]" />
+                    <col className="w-[10.6%]" />
+                    <col className="w-[5.2%]" />
+                  </colgroup>
+                  <thead className="bg-slate-200 text-[10px] font-black uppercase tracking-wide text-slate-600">
                     <tr>
-                      <th className="w-10 border border-slate-300 px-2 py-2 text-center">#</th>
-                      <th className="w-24 border border-slate-300 px-2 py-2" title="REG means the player is counted in the Serie A registration list.">REG</th>
-                      <th className="w-56 border border-slate-300 px-2 py-2 text-left">Player</th>
-                      <th className="w-24 border border-slate-300 px-2 py-2">Pos</th>
-                      <th className="w-36 border border-slate-300 px-2 py-2">DOB</th>
-                      <th className="w-20 border border-slate-300 px-2 py-2">Age</th>
-                      <th className="w-44 border border-slate-300 px-2 py-2 text-left">Nationality</th>
-                      <th className="w-28 border border-slate-300 px-2 py-2" title="Club-trained: counts toward the 4 club-trained quota.">Club</th>
-                      <th className="w-28 border border-slate-300 px-2 py-2" title="Italy-trained/homegrown: counts toward the 8 Italy-trained quota.">Italy</th>
-                      <th className="w-28 border border-slate-300 px-2 py-2" title="Non-EU/EEA player flag.">Non-EU</th>
-                      <th className="w-28 border border-slate-300 px-2 py-2" title="Arrived from abroad during this transfer window.">Abroad</th>
-                      <th className="w-28 border border-slate-300 px-2 py-2" title="Needs manual eligibility review.">Review</th>
-                      <th className="w-32 border border-slate-300 px-2 py-2">Category</th>
-                      <th className="w-40 border border-slate-300 px-2 py-2 text-left">Source</th>
-                      <th className="w-24 border border-slate-300 px-2 py-2">Delete</th>
+                      <th className="border border-slate-300 px-1 py-1 text-center">#</th>
+                      <th className="border border-slate-300 px-1 py-1">REG</th>
+                      <th className="border border-slate-300 px-1 py-1 text-left">Player</th>
+                      <th className="border border-slate-300 px-1 py-1">Pos</th>
+                      <th className="border border-slate-300 px-1 py-1">DOB</th>
+                      <th className="border border-slate-300 px-1 py-1">Age</th>
+                      <th className="border border-slate-300 px-1 py-1 text-left">Nation</th>
+                      <th className="border border-slate-300 px-1 py-1">Flags</th>
+                      <th className="border border-slate-300 px-1 py-1">Cat</th>
+                      <th className="border border-slate-300 px-1 py-1 text-left">Source</th>
+                      <th className="border border-slate-300 px-1 py-1">Del</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredPlayers.map((player, index) => {
                       const category = getCategory(player);
+                      const addition = isWorkbookAddition(player, selectedClub);
+                      const isSelected = selectedPlayerIds.includes(player.id);
+
                       return (
-                        <tr key={player.id} className={index % 2 === 0 ? "bg-white" : "bg-slate-50"}>
-                          <td className="border border-slate-200 px-2 py-1 text-center text-xs font-bold text-slate-500">{index + 1}</td>
-                          <td className="border border-slate-200 px-2 py-1 text-center">
+                        <tr key={player.id} className={`${getPlayerRowClass(player, index)} ${isSelected ? "outline outline-2 outline-green-600 outline-offset-[-2px]" : ""}`}>
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle font-bold text-slate-500">
+                            <label className="flex items-center justify-center gap-1">
+                              <input title={`Select ${player.name || "row"}`} type="checkbox" checked={isSelected} onChange={() => togglePlayerSelection(player.id)} className="h-3.5 w-3.5 cursor-pointer rounded border-slate-300" />
+                              <span>{index + 1}</span>
+                            </label>
+                          </td>
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle">
                             <RegistrationToggle value={player.status} onChange={(nextStatus) => updatePlayer(player.id, { status: nextStatus })} />
                           </td>
-                          <td className="border border-slate-200 px-1 py-1">
-                            <input value={player.name} onChange={(event) => updatePlayer(player.id, { name: event.target.value })} placeholder="Player name" className="w-full border border-transparent bg-transparent px-2 py-1 outline-none placeholder:text-slate-400 focus:border-green-700 focus:bg-white" />
+                          <td className="border border-slate-200 px-1 py-0.5 align-middle">
+                            <div className="flex items-center gap-1">
+                              <input value={player.name} onChange={(event) => updatePlayer(player.id, { name: event.target.value })} placeholder="Player name" className="min-w-0 flex-1 border border-transparent bg-transparent px-1 py-0.5 font-bold outline-none placeholder:text-slate-400 focus:border-green-700 focus:bg-white" />
+                              {addition && <span className="shrink-0 rounded border border-cyan-200 bg-cyan-50 px-1 text-[9px] font-black text-cyan-700">{player.sourceClub === "Manual" ? "M" : "+"}</span>}
+                            </div>
                           </td>
-                          <td className="border border-slate-200 px-1 py-1 text-center">
-                            <select value={player.position} onChange={(event) => updatePlayer(player.id, { position: event.target.value as Position })} className="w-full border border-transparent bg-transparent px-1 py-1 font-bold outline-none focus:border-green-700">
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle">
+                            <select value={player.position} onChange={(event) => updatePlayer(player.id, { position: event.target.value as Position })} className="w-full border border-transparent bg-transparent px-0.5 py-0.5 text-center font-black outline-none focus:border-green-700 focus:bg-white">
                               <option value="GK">GK</option>
                               <option value="DF">DF</option>
                               <option value="MF">MF</option>
                               <option value="FW">FW</option>
                             </select>
                           </td>
-                          <td className="border border-slate-200 px-1 py-1">
-                            <input type="date" value={player.dateOfBirth} onChange={(event) => updatePlayer(player.id, { dateOfBirth: event.target.value })} title="Date of birth" className="w-full border border-transparent bg-transparent px-2 py-1 outline-none focus:border-green-700 focus:bg-white" />
+                          <td className="border border-slate-200 px-1 py-0.5 align-middle">
+                            <input type="date" value={player.dateOfBirth} onChange={(event) => updatePlayer(player.id, { dateOfBirth: event.target.value })} title="Date of birth" className="w-full border border-transparent bg-transparent px-1 py-0.5 outline-none focus:border-green-700 focus:bg-white" />
                           </td>
-                          <td className="border border-slate-200 px-2 py-1 text-center font-bold">{getAge(player.dateOfBirth)}</td>
-                          <td className="border border-slate-200 px-1 py-1">
-                            <input value={player.nationality} onChange={(event) => updatePlayer(player.id, { nationality: event.target.value })} placeholder="Nationality" className="w-full border border-transparent bg-transparent px-2 py-1 outline-none placeholder:text-slate-400 focus:border-green-700 focus:bg-white" />
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle font-black">{getAge(player.dateOfBirth)}</td>
+                          <td className="border border-slate-200 px-1 py-0.5 align-middle">
+                            <input value={player.nationality} onChange={(event) => updatePlayer(player.id, { nationality: event.target.value })} placeholder="Nationality" className="w-full border border-transparent bg-transparent px-1 py-0.5 outline-none placeholder:text-slate-400 focus:border-green-700 focus:bg-white" />
                           </td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><CheckboxCell title="Club-trained: counts toward the 4 club-trained quota." checked={player.isClubTrained} onChange={(checked) => updatePlayer(player.id, { isClubTrained: checked, isItalyTrained: checked ? true : player.isItalyTrained })} /></td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><CheckboxCell title="Italy-trained/homegrown: counts toward the 8 Italy-trained quota." checked={player.isItalyTrained} onChange={(checked) => updatePlayer(player.id, { isItalyTrained: checked })} /></td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><CheckboxCell title="Non-EU/EEA player flag." checked={player.isNonEuOrEea} onChange={(checked) => updatePlayer(player.id, { isNonEuOrEea: checked })} /></td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><CheckboxCell title="Arrived from abroad during this transfer window." checked={player.fromAbroadThisWindow} onChange={(checked) => updatePlayer(player.id, { fromAbroadThisWindow: checked })} /></td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><CheckboxCell title="Needs manual eligibility review." checked={Boolean(player.needsReview)} onChange={(checked) => updatePlayer(player.id, { needsReview: checked })} /></td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><Badge className={category.className}>{category.label}</Badge></td>
-                          <td className="border border-slate-200 px-2 py-1 text-xs text-slate-500">{player.sourceClub}</td>
-                          <td className="border border-slate-200 px-2 py-1 text-center"><button onClick={() => removePlayer(player.id)} className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-black text-red-700 hover:bg-red-100">Delete</button></td>
+                          <td className="border border-slate-200 px-1 py-0.5 align-middle">
+                            <div className="grid grid-cols-5 gap-0.5 text-center text-[8px] font-black text-slate-500">
+                              <label title="Club-trained" className="cursor-pointer">C<CheckboxCell checked={player.isClubTrained} onChange={(checked) => updatePlayer(player.id, { isClubTrained: checked, isItalyTrained: checked ? true : player.isItalyTrained })} /></label>
+                              <label title="Italy-trained/homegrown" className="cursor-pointer">I<CheckboxCell checked={player.isItalyTrained} onChange={(checked) => updatePlayer(player.id, { isItalyTrained: checked })} /></label>
+                              <label title="Non-EU/EEA player" className="cursor-pointer">EU<CheckboxCell checked={player.isNonEuOrEea} onChange={(checked) => updatePlayer(player.id, { isNonEuOrEea: checked })} /></label>
+                              <label title="Arrived from abroad" className="cursor-pointer">A<CheckboxCell checked={player.fromAbroadThisWindow} onChange={(checked) => updatePlayer(player.id, { fromAbroadThisWindow: checked })} /></label>
+                              <label title="Needs review" className="cursor-pointer">R<CheckboxCell checked={Boolean(player.needsReview)} onChange={(checked) => updatePlayer(player.id, { needsReview: checked })} /></label>
+                            </div>
+                          </td>
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle"><Badge className={category.className}>{category.label}</Badge></td>
+                          <td className="truncate border border-slate-200 px-1 py-0.5 align-middle text-[10px] font-bold text-slate-500" title={player.sourceClub}>{player.sourceClub}</td>
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle">
+                            <button onClick={() => removePlayer(player.id)} className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-black text-red-700 hover:bg-red-100">Del</button>
+                          </td>
                         </tr>
                       );
                     })}
                     <tr className="bg-white">
-                      <td className="border border-slate-200 px-2 py-1 text-center text-xs font-bold text-slate-400">+</td>
-                      <td colSpan={14} className="border border-slate-200 p-0">
+                      <td className="border border-slate-200 px-1 py-1 text-center text-xs font-bold text-slate-400">+</td>
+                      <td colSpan={10} className="border border-slate-200 p-0">
                         <button onClick={addBlankRow} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-black text-green-700 hover:bg-green-50">
                           <span className="grid h-5 w-5 place-items-center rounded border border-green-700 text-xs">+</span>
                           Add new player
@@ -743,33 +1320,58 @@ export default function App() {
                   <div><b>Non-EU</b>: non-EU/EEA player.</div>
                   <div><b>Abroad</b>: arrived from abroad this window.</div>
                   <div><b>Review</b>: needs manual eligibility check.</div>
+                  <div><b>Amber/red rows</b>: review or missing data.</div>
                 </div>
               </section>
 
+              <SquadInsightPanel
+                validation={validation}
+                positionCounts={squadPositionCounts}
+                averageAge={averageAge}
+                duplicateNameCount={duplicateNameCount}
+              />
               <RulesPanel validation={validation} />
-              <TransferPanel transferSearch={transferSearch} setTransferSearch={setTransferSearch} filteredTransfers={filteredTransfers} totalPoolPlayers={TRANSFER_POOL.length} addTransfer={addTransfer} />
+              <section className="border border-slate-300 bg-white shadow-sm">
+                <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Player pool</div>
+                <div className="p-3 text-xs text-slate-600">
+                  <p className="mb-3">Search the bundled player database in a drawer so the workbook stays focused.</p>
+                  <button type="button" onClick={() => setIsTransferPanelOpen(true)} className="w-full border border-green-700 bg-green-700 px-3 py-2 text-xs font-black text-white hover:bg-green-800">
+                    Open player pool
+                  </button>
+                </div>
+              </section>
             </aside>
           </section>
-        ) : (
-          <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_340px]">
+        ) : activeTab === "lineup" ? (
+          <section className="grid gap-3">
             <section className="border border-slate-300 bg-white shadow-sm">
-              <div className="flex items-center justify-between border-b border-slate-300 bg-slate-100 px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 bg-slate-100 px-3 py-2">
                 <div>
                   <div className="text-sm font-black">Lineup Board</div>
+                  <div className="text-xs font-semibold text-slate-500">Drag players freely onto the pitch. Drop a player back on the subs panel to remove him.</div>
                 </div>
-                <button onClick={resetLineup} className="border border-slate-300 bg-white px-3 py-1 text-xs font-black hover:bg-slate-50">Reset board</button>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={() => exportLineupSvg(selectedClub, placedPlayers)} className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Export SVG</button>
+                  <button type="button" onClick={resetLineup} className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-black hover:bg-slate-50">Reset board</button>
+                </div>
               </div>
 
-              <div
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={handlePitchDrop}
-                className="relative h-[calc(100vh-306px)] min-h-[500px] overflow-hidden bg-emerald-700"
-              >
-                <div className="absolute inset-5 border-2 border-white/35" />
-                <div className="absolute left-1/2 top-1/2 h-32 w-32 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white/25" />
+              <div className="grid gap-3 bg-slate-50 p-3 xl:grid-cols-[minmax(360px,620px)_minmax(280px,1fr)] xl:items-start">
+                <div
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={handlePitchDrop}
+                  className="lineup-pitch relative aspect-[3/4] w-full max-w-[620px] overflow-hidden bg-emerald-700"
+                >
+                <div className="absolute inset-5 border-2 border-white/35 shadow-[inset_0_0_60px_rgba(0,0,0,0.18)]" />
+                <div className="absolute left-5 right-5 top-1/2 border-t-2 border-white/25" />
+                <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white/25 sm:h-32 sm:w-32" />
                 <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/40" />
-                <div className="absolute left-1/2 top-5 h-24 w-48 -translate-x-1/2 border-x-2 border-b-2 border-white/25" />
-                <div className="absolute bottom-5 left-1/2 h-24 w-48 -translate-x-1/2 border-x-2 border-t-2 border-white/25" />
+                <div className="absolute left-1/2 top-5 h-28 w-40 -translate-x-1/2 border-x-2 border-b-2 border-white/25 sm:h-32 sm:w-48" />
+                <div className="absolute bottom-5 left-1/2 h-28 w-40 -translate-x-1/2 border-x-2 border-t-2 border-white/25 sm:h-32 sm:w-48" />
+                <div className="absolute left-1/2 top-5 h-10 w-24 -translate-x-1/2 border-x-2 border-b-2 border-white/20" />
+                <div className="absolute bottom-5 left-1/2 h-10 w-24 -translate-x-1/2 border-x-2 border-t-2 border-white/20" />
+                <div className="absolute left-1/2 top-[17%] h-2 w-2 -translate-x-1/2 rounded-full bg-white/35" />
+                <div className="absolute bottom-[17%] left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-white/35" />
                 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.10),transparent_42%)]" />
 
                 {placedPlayers.length === 0 && (
@@ -779,7 +1381,6 @@ export default function App() {
                 )}
 
                 {placedPlayers.map(({ player, placement }) => {
-                  const category = getCategory(player);
                   return (
                     <div
                       key={player.id}
@@ -792,33 +1393,46 @@ export default function App() {
                       className="absolute -translate-x-1/2 -translate-y-1/2 cursor-grab active:cursor-grabbing"
                       style={{ left: `${placement.x}%`, top: `${placement.y}%` }}
                     >
-                      <div className={`min-w-32 rounded border-2 px-2 py-1 text-center text-xs font-black shadow-lg backdrop-blur ${category.chipClassName}`}>
-                        <div className="truncate">{player.name}</div>
-                        <div className="text-[10px] opacity-75">{player.position} · {category.label}</div>
+                      <div className="flex flex-col items-center gap-1">
+                        <div className="grid h-12 w-12 place-items-center rounded-full border-2 border-white bg-slate-950/90 text-xs font-black text-white shadow-xl ring-2 ring-white/35">
+                          {getPlayerInitials(player.name)}
+                        </div>
+                        <div className="max-w-28 truncate rounded-full bg-black/60 px-2 py-0.5 text-center text-[10px] font-black text-white shadow">
+                          {player.name}
+                        </div>
                       </div>
-                      <button onClick={() => removeFromLineup(player.id)} className="mx-auto mt-1 block rounded bg-black/50 px-2 py-0.5 text-[10px] font-black text-white hover:bg-black/70">remove</button>
+                      <button onClick={() => removeFromLineup(player.id)} className="mx-auto mt-1 grid h-5 w-5 place-items-center rounded-full bg-black/60 text-[11px] font-black text-white hover:bg-black/80">x</button>
                     </div>
                   );
                 })}
-              </div>
+                </div>
 
               <div
                 onDragOver={(event) => event.preventDefault()}
                 onDrop={handleBenchDrop}
-                className="border-t border-slate-300 bg-white p-3"
+                className="border border-slate-300 bg-white p-3 shadow-sm"
               >
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-black">Bench</div>
+                    <div className="text-sm font-black">Subs</div>
                     <div className="text-xs text-slate-500">Available registered players. Drop a player here to remove him from the board.</div>
                   </div>
-                  <Badge className="border-slate-200 bg-slate-100 text-slate-700">{availableLineupPlayers.length} available</Badge>
+                  <Badge className="border-slate-200 bg-slate-100 text-slate-700">{visibleBenchPlayers.length}/{availableLineupPlayers.length} available</Badge>
                 </div>
-                <div className="flex max-h-28 flex-wrap gap-2 overflow-auto">
-                  {availableLineupPlayers.length === 0 ? (
-                    <div className="border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-500">No bench players available.</div>
-                  ) : availableLineupPlayers.map((player) => {
-                    const category = getCategory(player);
+                <div className="mb-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_120px]">
+                  <input value={lineupSearch} onChange={(event) => setLineupSearch(event.target.value)} placeholder="Search bench..." className="h-9 border border-slate-300 px-2 text-sm outline-none focus:border-green-700" />
+                  <select value={benchPositionFilter} onChange={(event) => setBenchPositionFilter(event.target.value as "All" | Position)} className="h-9 border border-slate-300 bg-white px-2 text-sm font-bold outline-none focus:border-green-700">
+                    <option value="All">All pos</option>
+                    <option value="GK">GK</option>
+                    <option value="DF">DF</option>
+                    <option value="MF">MF</option>
+                    <option value="FW">FW</option>
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">
+                  {visibleBenchPlayers.length === 0 ? (
+                    <div className="border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-500">No matching bench players.</div>
+                  ) : visibleBenchPlayers.map((player) => {
                     return (
                       <div
                         key={player.id}
@@ -828,32 +1442,46 @@ export default function App() {
                           event.dataTransfer.setData("text/plain", player.id);
                         }}
                         onDragEnd={() => setDraggingPlayerId(null)}
-                        className={`cursor-grab rounded border px-3 py-2 text-xs font-black shadow-sm active:cursor-grabbing ${category.chipClassName}`}
+                        className="cursor-grab rounded border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs font-black shadow-sm active:cursor-grabbing"
                       >
-                        <div>{player.name}</div>
-                        <div className="text-[10px] opacity-70">{player.position} · {category.label}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full border-2 border-white bg-slate-900 text-[10px] text-white shadow">{getPlayerInitials(player.name)}</div>
+                          <div className="min-w-0">
+                            <div className="truncate">{player.name}</div>
+                            <div className="text-[10px] text-slate-500">{player.position}</div>
+                          </div>
+                        </div>
                         <button onClick={() => addPlayerToBoard(player.id)} className="mt-1 block w-full rounded bg-white/70 px-2 py-0.5 text-[10px] font-black hover:bg-white">add</button>
                       </div>
                     );
                   })}
                 </div>
               </div>
+              </div>
             </section>
-
-            <aside className="space-y-3">
-              <section className="border border-slate-300 bg-white shadow-sm">
-                <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Lineup summary</div>
-                <div className="grid grid-cols-2 border-b border-slate-200">
-                  <Metric label="On board" value={`${placedPlayers.length}`} />
-                  <Metric label="Available" value={`${availableLineupPlayers.length}`} />
-                </div>
-                <div className="p-3 text-xs text-slate-600">Only REG players with name, DOB and nationality appear in the lineup board. If a player becomes OUT or incomplete in the sheet, he is removed from the board automatically.</div>
-              </section>
-              <RulesPanel validation={validation} />
-            </aside>
           </section>
+        ) : (
+          <LeagueOverview
+            clubs={clubs}
+            selectedSlug={selectedSlug}
+            onOpenClub={(slug) => {
+              setSelectedSlug(slug);
+              setActiveTab("sheet");
+            }}
+          />
         )}
       </main>
+      <TransferPanel
+        isOpen={isTransferPanelOpen}
+        onClose={() => setIsTransferPanelOpen(false)}
+        transferSearch={transferSearch}
+        setTransferSearch={setTransferSearch}
+        transferLeagueFilter={transferLeagueFilter}
+        setTransferLeagueFilter={setTransferLeagueFilter}
+        filteredTransfers={filteredTransfers}
+        totalPoolPlayers={TRANSFER_POOL.length}
+        addTransfer={addTransfer}
+      />
     </div>
   );
 }
@@ -882,34 +1510,181 @@ function RulesPanel({ validation }: { validation: ValidationResult }) {
   );
 }
 
+function SquadInsightPanel({
+  validation,
+  positionCounts,
+  averageAge,
+  duplicateNameCount,
+}: {
+  validation: ValidationResult;
+  positionCounts: Record<Position, number>;
+  averageAge: string;
+  duplicateNameCount: number;
+}) {
+  const seniorSlotsLeft = Math.max(0, 25 - validation.counts.senior);
+  const nonHgSlotsLeft = Math.max(0, 17 - validation.counts.nonHomegrown);
+  const clubNeeded = Math.max(0, 4 - validation.counts.clubTrained);
+  const italyNeeded = Math.max(0, 8 - validation.counts.italyTrained);
+
+  return (
+    <section className="border border-slate-300 bg-white shadow-sm">
+      <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Squad insight</div>
+      <div className="grid grid-cols-2 border-b border-slate-200 text-xs">
+        <div className="border-r border-slate-200 p-3">
+          <div className="font-black uppercase tracking-wide text-slate-400">Avg age</div>
+          <div className="mt-1 text-lg font-black text-slate-950">{averageAge}</div>
+        </div>
+        <div className="p-3">
+          <div className="font-black uppercase tracking-wide text-slate-400">Senior room</div>
+          <div className="mt-1 text-lg font-black text-slate-950">{seniorSlotsLeft}</div>
+        </div>
+      </div>
+      <div className="grid grid-cols-4 border-b border-slate-200 text-center text-xs font-black">
+        {(["GK", "DF", "MF", "FW"] as Position[]).map((position) => (
+          <div key={position} className="border-r border-slate-200 p-2 last:border-r-0">
+            <div className="text-slate-400">{position}</div>
+            <div className="text-slate-950">{positionCounts[position]}</div>
+          </div>
+        ))}
+      </div>
+      <div className="space-y-2 p-3 text-xs">
+        <div className={clubNeeded > 0 ? "font-bold text-amber-800" : "font-bold text-emerald-800"}>
+          Club-trained: {clubNeeded > 0 ? `${clubNeeded} more needed` : "quota covered"}
+        </div>
+        <div className={italyNeeded > 0 ? "font-bold text-amber-800" : "font-bold text-emerald-800"}>
+          Italy-trained: {italyNeeded > 0 ? `${italyNeeded} more needed` : "quota covered"}
+        </div>
+        <div className="font-bold text-slate-700">Non-HG senior slots left: {nonHgSlotsLeft}</div>
+        {duplicateNameCount > 0 && <div className="border border-amber-300 bg-amber-50 p-2 font-bold text-amber-800">{duplicateNameCount} duplicate player name group(s) found.</div>}
+      </div>
+    </section>
+  );
+}
+
+function LeagueOverview({
+  clubs,
+  selectedSlug,
+  onOpenClub,
+}: {
+  clubs: Club[];
+  selectedSlug: string;
+  onOpenClub: (slug: string) => void;
+}) {
+  const rows = clubs.map((club) => ({ club, validation: validateSerieAList(club.players) }));
+  const okCount = rows.filter(({ validation }) => validation.ok).length;
+  const issueCount = rows.length - okCount;
+
+  return (
+    <section className="border border-slate-300 bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-300 bg-slate-100 px-3 py-3">
+        <div>
+          <div className="text-sm font-black">League Overview</div>
+          <div className="text-xs font-semibold text-slate-500">Registration health across all 20 Serie A clubs.</div>
+        </div>
+        <div className="flex gap-2 text-xs font-black">
+          <Badge className="border-emerald-200 bg-emerald-50 text-emerald-800">{okCount} OK</Badge>
+          <Badge className="border-amber-200 bg-amber-50 text-amber-800">{issueCount} need work</Badge>
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[980px] border-collapse text-xs">
+          <thead className="bg-slate-200 text-[11px] font-black uppercase tracking-wide text-slate-600">
+            <tr>
+              <th className="border border-slate-300 px-2 py-2 text-left">Club</th>
+              <th className="border border-slate-300 px-2 py-2">Status</th>
+              <th className="border border-slate-300 px-2 py-2">Registered</th>
+              <th className="border border-slate-300 px-2 py-2">Senior</th>
+              <th className="border border-slate-300 px-2 py-2">U23</th>
+              <th className="border border-slate-300 px-2 py-2">Non-HG</th>
+              <th className="border border-slate-300 px-2 py-2">Club</th>
+              <th className="border border-slate-300 px-2 py-2">Italy</th>
+              <th className="border border-slate-300 px-2 py-2">Review</th>
+              <th className="border border-slate-300 px-2 py-2">Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ club, validation }, index) => (
+              <tr key={club.slug} className={club.slug === selectedSlug ? "bg-green-50" : index % 2 === 0 ? "bg-white" : "bg-slate-50"}>
+                <td className="border border-slate-200 px-3 py-2">
+                  <div className="font-black text-slate-950">{club.name}</div>
+                  <div className="text-[10px] font-bold text-slate-500">{club.city}</div>
+                </td>
+                <td className="border border-slate-200 px-2 py-2 text-center"><StatusCell ok={validation.ok} /></td>
+                <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.registered}</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.senior > 25 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.senior}/25</td>
+                <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.u23}</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.nonHomegrown > 17 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.nonHomegrown}/17</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.clubTrained < 4 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.clubTrained}/4</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.italyTrained < 8 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.italyTrained}/8</td>
+                <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.review}</td>
+                <td className="border border-slate-200 px-2 py-2 text-center">
+                  <button type="button" onClick={() => onOpenClub(club.slug)} className="border border-green-700 bg-green-700 px-3 py-1.5 text-xs font-black text-white hover:bg-green-800">Open</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function TransferPanel({
+  isOpen,
+  onClose,
   transferSearch,
   setTransferSearch,
+  transferLeagueFilter,
+  setTransferLeagueFilter,
   filteredTransfers,
   totalPoolPlayers,
   addTransfer,
 }: {
+  isOpen: boolean;
+  onClose: () => void;
   transferSearch: string;
   setTransferSearch: (value: string) => void;
+  transferLeagueFilter: TransferLeagueFilter;
+  setTransferLeagueFilter: (value: TransferLeagueFilter) => void;
   filteredTransfers: Player[];
   totalPoolPlayers: number;
   addTransfer: (player: Player) => void;
 }) {
+  if (!isOpen) return null;
+
   return (
-    <section className="border border-slate-300 bg-white shadow-sm">
-      <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Player pool / database · {totalPoolPlayers} players</div>
-      <div className="p-3">
-        <div className="mb-2 text-xs font-semibold text-slate-500">Search here to add players that are not already in the current squad sheet.</div>
-        <input value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="Search player pool / database..." className="mb-2 h-9 w-full border border-slate-300 px-2 text-sm outline-none focus:border-green-700" />
-        <div className="max-h-[340px] overflow-auto space-y-2">
-          {filteredTransfers.map((player) => {
+    <div className="fixed inset-0 z-[70] flex justify-end bg-slate-950/35">
+      <button type="button" aria-label="Close player pool" onClick={onClose} className="absolute inset-0 cursor-default" />
+      <section className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-300 bg-white shadow-2xl">
+        <div className="flex items-center justify-between border-b border-slate-300 bg-slate-100 px-4 py-3">
+          <div>
+            <div className="text-sm font-black">Player pool / database · {totalPoolPlayers} players</div>
+            <div className="text-xs font-semibold text-slate-500">{filteredTransfers.length} visible results</div>
+          </div>
+          <button type="button" onClick={onClose} className="border border-slate-300 bg-white px-3 py-1.5 text-xs font-black text-slate-700 hover:bg-slate-50">Close</button>
+        </div>
+
+        <div className="border-b border-slate-200 p-4">
+          <div className="mb-2 text-xs font-semibold text-slate-500">Search here to add players that are not already in the current squad sheet.</div>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_170px]">
+            <input value={transferSearch} onChange={(event) => setTransferSearch(event.target.value)} placeholder="Search player, club, league, nationality..." className="h-10 w-full border border-slate-300 px-3 text-sm outline-none focus:border-green-700" autoFocus />
+            <select value={transferLeagueFilter} onChange={(event) => setTransferLeagueFilter(event.target.value as TransferLeagueFilter)} className="h-10 border border-slate-300 bg-white px-2 text-sm font-bold outline-none focus:border-green-700">
+              {TRANSFER_LEAGUES.map((league) => <option key={league} value={league}>{league}</option>)}
+            </select>
+          </div>
+        </div>
+
+        <div className="flex-1 space-y-2 overflow-auto p-4">
+          {filteredTransfers.length === 0 ? (
+            <div className="border border-dashed border-slate-300 bg-slate-50 p-4 text-sm font-bold text-slate-500">No matching players found.</div>
+          ) : filteredTransfers.map((player) => {
             const category = getCategory(player);
             return (
-              <div key={player.id} className="border border-slate-200 bg-slate-50 p-2">
+              <div key={player.id} className="border border-slate-200 bg-slate-50 p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="text-sm font-black">{player.name}</div>
-                    <div className="text-xs text-slate-500">{player.position} · {player.sourceClub}</div>
+                    <div className="text-xs text-slate-500">{player.position} · {player.sourceClub} · {player.sourceLeague ?? "Unknown league"}</div>
                   </div>
                   <Badge className={category.className}>{category.label}</Badge>
                 </div>
@@ -918,7 +1693,7 @@ function TransferPanel({
             );
           })}
         </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }

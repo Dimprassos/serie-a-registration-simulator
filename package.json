@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "import:players": "node scripts/import-football-data.mjs",
     "electron": "npm run build && electron .",
     "dist:dir": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder --win nsis"

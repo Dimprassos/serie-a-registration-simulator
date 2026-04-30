@@ -9,3 +9,20 @@ html, body, #root {
 body {
   margin: 0;
 }
+
+.lineup-pitch {
+  background:
+    radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.12), transparent 34%),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.08) 0 11%, rgba(255, 255, 255, 0.02) 11% 22%),
+    linear-gradient(135deg, #047857 0%, #065f46 100%);
+}
+
+.lineup-pitch::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 100% 18px;
+  opacity: 0.5;
+}

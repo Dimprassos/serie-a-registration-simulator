@@ -20,6 +20,7 @@ Live site: https://serie-a-registration-simulator.vercel.app/
   - Manual review
 - Automatic registration rule checks
 - Player pool search and add-to-sheet flow
+- Expandable player database import for broader league coverage
 - Manual player row creation
 - Free-form lineup board
 - Bench section for available registered players
@@ -124,6 +125,31 @@ dist-electron/
 ```
 
 If the build fails with an `EBUSY` error, close any running app window and delete the previous `dist-electron` folder before rebuilding.
+
+## Player Data Import
+
+The bundled snapshot currently ships with planning/demo player data. To rebuild it from Football-Data, create an API token and run:
+
+```powershell
+$env:FOOTBALL_DATA_TOKEN="your-token"
+npm run import:players
+```
+
+The importer defaults to 20 major first-division competitions exposed by Football-Data. You can override the list with comma-separated competition codes:
+
+```powershell
+$env:FOOTBALL_DATA_COMPETITIONS="PL,PD,SA,BL1,FL1"
+npm run import:players
+```
+
+To try every league code exposed by the provider:
+
+```powershell
+$env:FOOTBALL_DATA_COMPETITIONS="ALL"
+npm run import:players
+```
+
+Import coverage depends on the API plan, available squad data, and rate limits. Imported eligibility flags are intentionally marked for manual review because provider squad data does not verify Serie A registration eligibility.
 
 ## Security
 
