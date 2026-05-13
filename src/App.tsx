@@ -387,6 +387,10 @@ function getAge(dateOfBirth: string) {
   return String(age);
 }
 
+function formatUsedAvailable(used: number, available: number) {
+  return `${used} used / ${available} available`;
+}
+
 function isReadyForLineup(player: Player) {
   return (
     player.status === "registered" &&
@@ -468,8 +472,8 @@ function validateSerieAList(players: Player[]): ValidationResult {
   if (senior.length > seniorCapacity) {
     errors.push(
       unusedReservedSlots > 0
-        ? `Too many senior players for available reserved slots: ${senior.length}/${seniorCapacity}. ${unusedReservedSlots} reserved senior slot${unusedReservedSlots === 1 ? " is" : "s are"} unused.`
-        : `Too many senior players: ${senior.length}/25.`
+        ? `Too many senior players for available reserved slots: ${senior.length} used, ${seniorCapacity} available. ${unusedReservedSlots} reserved senior slot${unusedReservedSlots === 1 ? " is" : "s are"} unused.`
+        : `Too many senior players: ${senior.length} used, 25 available.`
     );
   }
   if (nonHomegrown > 17) errors.push(`Too many non-homegrown senior players: ${nonHomegrown}/17.`);
@@ -541,7 +545,7 @@ function runSelfTests() {
   expect(fullListWithThreeClub.counts.senior === 25, "Reserved-slot self-test should build a full 25-player senior list.");
   expect(fullListWithThreeClub.counts.seniorCapacity === 24, "Three club-trained seniors with excess association-trained seniors should reduce senior capacity to 24.");
   expect(!fullListWithThreeClub.ok, "A 25-player senior list should fail when only 24 reserved slots are available.");
-  expect(fullListWithThreeClub.errors.some((error) => error.includes("25/24")), "Reduced-capacity errors should explain the available senior slots.");
+  expect(fullListWithThreeClub.errors.some((error) => error.includes("25 used, 24 available")), "Reduced-capacity errors should explain the available senior slots.");
   const reducedListWithThreeClub = validateSerieAList([
     ...Array.from({ length: 17 }, (_, index) => makeTestSenior(`Reduced Non-HG ${index + 1}`)),
     ...Array.from({ length: 3 }, (_, index) => makeTestSenior(`Reduced Club ${index + 1}`, true, true)),
@@ -613,14 +617,26 @@ function RailStat({ label, value, tone = "neutral" }: { label: string; value: st
   );
 }
 
-function RailProgress({ label, value, max, danger = false }: { label: string; value: number; max: number; danger?: boolean }) {
+function RailProgress({
+  label,
+  value,
+  max,
+  danger = false,
+  valueLabel,
+}: {
+  label: string;
+  value: number;
+  max: number;
+  danger?: boolean;
+  valueLabel?: string;
+}) {
   const progress = max > 0 ? clamp((value / max) * 100, 0, 100) : 0;
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between text-[11px] font-black text-slate-600">
         <span>{label}</span>
-        <span className={danger ? "text-amber-800" : "text-slate-950"}>{value}/{max}</span>
+        <span className={danger ? "text-amber-800" : "text-slate-950"}>{valueLabel ?? `${value}/${max}`}</span>
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-slate-200">
         <div className={`h-full rounded-full ${danger ? "bg-amber-500" : "bg-emerald-600"}`} style={{ width: `${progress}%` }} />
@@ -1320,13 +1336,14 @@ export default function App() {
             <button onClick={() => setActiveTab("overview")} className={`border-r border-slate-300 px-5 py-2 text-sm font-black ${activeTab === "overview" ? "bg-white text-green-800" : "bg-slate-100 text-slate-500 hover:bg-slate-50"}`}>League Overview</button>
           </div>
 
-          <div className="grid grid-cols-2 border-b border-slate-300 md:grid-cols-4 xl:grid-cols-8">
+          <div className="grid grid-cols-2 border-b border-slate-300 md:grid-cols-3 xl:grid-cols-9">
             <Metric label="Club" value={selectedClub.shortName} />
             <Metric label="Rows" value={`${filteredPlayers.length}`} />
-            <Metric label="Registered" value={`${validation.counts.registered}`} progress={(validation.counts.registered / 25) * 100} />
-            <Metric label="Senior" value={`${validation.counts.senior}/${validation.counts.seniorCapacity}`} danger={validation.counts.senior > validation.counts.seniorCapacity} progress={(validation.counts.senior / validation.counts.seniorCapacity) * 100} />
+            <Metric label="Registered" value={`${validation.counts.registered}`} />
+            <Metric label="Senior used" value={`${validation.counts.senior}`} danger={validation.counts.senior > validation.counts.seniorCapacity} progress={(validation.counts.senior / validation.counts.seniorCapacity) * 100} />
+            <Metric label="Senior available" value={`${validation.counts.seniorCapacity}`} danger={validation.counts.senior > validation.counts.seniorCapacity} />
             <Metric label="U23" value={`${validation.counts.u23}`} />
-            <Metric label="Non-HG" value={`${validation.counts.nonHomegrown}/17`} danger={validation.counts.nonHomegrown > 17} progress={(validation.counts.nonHomegrown / 17) * 100} />
+            <Metric label="Non-HG used" value={`${validation.counts.nonHomegrown}`} danger={validation.counts.nonHomegrown > 17} progress={(validation.counts.nonHomegrown / 17) * 100} />
             <Metric label="Senior Club" value={`${validation.counts.clubTrained} C`} />
             <Metric label="Senior Local" value={`${validation.counts.italyTrained} HG`} />
           </div>
@@ -1660,14 +1677,20 @@ function RulesPanel({ validation }: { validation: ValidationResult }) {
         <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 p-2">
           <div>
             <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Sheet status</div>
-            <div className="text-xs font-bold text-slate-600">Reserved slots lower capacity when unfilled.</div>
+            <div className="text-xs font-bold text-slate-600">Senior slots use the same used/available model everywhere.</div>
           </div>
           <StatusCell ok={validation.ok} />
         </div>
 
         <div className="space-y-2">
-          <RailProgress label="Senior capacity" value={validation.counts.senior} max={validation.counts.seniorCapacity} danger={validation.counts.senior > validation.counts.seniorCapacity} />
-          <RailProgress label="Non-HG senior slots" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} />
+          <RailProgress
+            label="Senior slots"
+            value={validation.counts.senior}
+            max={validation.counts.seniorCapacity}
+            danger={validation.counts.senior > validation.counts.seniorCapacity}
+            valueLabel={formatUsedAvailable(validation.counts.senior, validation.counts.seniorCapacity)}
+          />
+          <RailProgress label="Non-HG senior slots" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} valueLabel={formatUsedAvailable(validation.counts.nonHomegrown, 17)} />
         </div>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -1678,9 +1701,9 @@ function RulesPanel({ validation }: { validation: ValidationResult }) {
         </div>
 
         <div className="rounded-md border border-slate-200 bg-white p-3 text-xs font-semibold leading-5 text-slate-600">
-          <div><b>25</b> senior places only when every reserved slot is usable.</div>
-          <div><b>17</b> non-homegrown/free senior places.</div>
-          <div><b>C</b> and <b>I</b> can be shown on U23 players without filling senior slots.</div>
+          <div>Senior capacity is <b>17 free slots</b> plus filled senior homegrown slots, up to <b>25 total</b>.</div>
+          <div><b>C</b> means club-trained. <b>I</b> means Italy-trained/homegrown.</div>
+          <div>U23 players can show C or I, but they do not use or fill senior slots.</div>
         </div>
 
         {(validation.errors.length > 0 || validation.warnings.length > 0) && (
@@ -1713,13 +1736,19 @@ function SquadInsightPanel({
       <div className="space-y-3 p-3">
         <div className="grid grid-cols-3 gap-2 text-xs">
           <RailStat label="Avg age" value={averageAge} />
-          <RailStat label="Room" value={`${seniorSlotsLeft}`} tone={validation.counts.senior > validation.counts.seniorCapacity ? "warn" : "good"} />
+          <RailStat label="Slots left" value={`${seniorSlotsLeft}`} tone={validation.counts.senior > validation.counts.seniorCapacity ? "warn" : "good"} />
           <RailStat label="Non-HG left" value={`${nonHgSlotsLeft}`} tone={validation.counts.nonHomegrown > 17 ? "warn" : "neutral"} />
         </div>
 
         <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
-          <RailProgress label="Senior capacity" value={validation.counts.senior} max={validation.counts.seniorCapacity} danger={validation.counts.senior > validation.counts.seniorCapacity} />
-          <RailProgress label="Non-HG usage" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} />
+          <RailProgress
+            label="Senior slots"
+            value={validation.counts.senior}
+            max={validation.counts.seniorCapacity}
+            danger={validation.counts.senior > validation.counts.seniorCapacity}
+            valueLabel={formatUsedAvailable(validation.counts.senior, validation.counts.seniorCapacity)}
+          />
+          <RailProgress label="Non-HG slots" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} valueLabel={formatUsedAvailable(validation.counts.nonHomegrown, 17)} />
         </div>
 
       <div className="grid grid-cols-4 overflow-hidden rounded-md border border-slate-200 text-center text-xs font-black">
@@ -1739,7 +1768,7 @@ function SquadInsightPanel({
         </div>
 
         <div className="rounded-md border border-slate-200 bg-white p-3 text-xs font-semibold leading-5 text-slate-600">
-          Italy-only senior players: <b>{validation.counts.associationTrained}</b>. Non-HG senior slots left: <b>{nonHgSlotsLeft}</b>.
+          Italy-only senior players: <b>{validation.counts.associationTrained}</b>. Senior slots left: <b>{seniorSlotsLeft}</b>.
         </div>
 
         {validation.counts.unusedReservedSlots > 0 && (
@@ -1790,7 +1819,7 @@ function LeagueOverview({
               <th className="border border-slate-300 px-2 py-2 text-left">Club</th>
               <th className="border border-slate-300 px-2 py-2">Status</th>
               <th className="border border-slate-300 px-2 py-2">Registered</th>
-              <th className="border border-slate-300 px-2 py-2">Senior</th>
+              <th className="border border-slate-300 px-2 py-2">Senior slots</th>
               <th className="border border-slate-300 px-2 py-2">U23</th>
               <th className="border border-slate-300 px-2 py-2">Non-HG</th>
               <th className="border border-slate-300 px-2 py-2">Senior C</th>
@@ -1808,7 +1837,10 @@ function LeagueOverview({
                 </td>
                 <td className="border border-slate-200 px-2 py-2 text-center"><StatusCell ok={validation.ok} /></td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.registered}</td>
-                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.senior > validation.counts.seniorCapacity ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.senior}/{validation.counts.seniorCapacity}</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.senior > validation.counts.seniorCapacity ? "bg-amber-50 text-amber-800" : ""}`}>
+                  <div>{validation.counts.senior} used</div>
+                  <div className="text-[10px] text-slate-500">{validation.counts.seniorCapacity} available</div>
+                </td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.u23}</td>
                 <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.nonHomegrown > 17 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.nonHomegrown}/17</td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.clubTrained} C</td>
