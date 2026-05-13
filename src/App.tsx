@@ -80,6 +80,13 @@ type ValidationResult = {
     nonHomegrown: number;
     clubTrained: number;
     italyTrained: number;
+    clubTrainedTotal: number;
+    italyTrainedTotal: number;
+    clubTrainedNonSenior: number;
+    italyTrainedNonSenior: number;
+    associationTrained: number;
+    seniorCapacity: number;
+    unusedReservedSlots: number;
     nonEuArrivals: number;
     review: number;
     incompleteRegistered: number;
@@ -98,6 +105,14 @@ type SavedWorkbook = {
   lineups: Record<string, Record<string, LineupPlacement>>;
   selectedSlug: string;
   exportedAt?: string;
+};
+
+const CATEGORY_STYLES: Record<Category, { className: string; chipClassName: string }> = {
+  U23: { className: "bg-emerald-50 text-emerald-700 border-emerald-200", chipClassName: "border-emerald-300 bg-emerald-50 text-emerald-800" },
+  Club: { className: "bg-sky-50 text-sky-700 border-sky-200", chipClassName: "border-sky-300 bg-sky-50 text-sky-800" },
+  Italy: { className: "bg-indigo-50 text-indigo-700 border-indigo-200", chipClassName: "border-indigo-300 bg-indigo-50 text-indigo-800" },
+  Review: { className: "bg-amber-50 text-amber-700 border-amber-200", chipClassName: "border-amber-300 bg-amber-50 text-amber-800" },
+  "Non-HG": { className: "bg-slate-100 text-slate-700 border-slate-200", chipClassName: "border-slate-300 bg-white text-slate-800" },
 };
 
 const SEASON_START_YEAR = 2026;
@@ -205,6 +220,23 @@ function makePlayer(
     status: "registered",
     sourceClub,
     needsReview: fromAbroadThisWindow,
+  };
+}
+
+function createManualPlayer(clubSlug: string, position: Position, id = `manual-${clubSlug}-${Date.now()}`): Player {
+  return {
+    id,
+    name: "",
+    dateOfBirth: "",
+    position,
+    nationality: "",
+    isClubTrained: false,
+    isItalyTrained: false,
+    isNonEuOrEea: false,
+    fromAbroadThisWindow: false,
+    status: "registered",
+    sourceClub: "Manual",
+    needsReview: true,
   };
 }
 
@@ -371,44 +403,76 @@ function isIncompleteRegistered(player: Player) {
   );
 }
 
+function getCategoryStyle(label: Category): { label: Category; className: string; chipClassName: string } {
+  return { label, ...CATEGORY_STYLES[label] };
+}
+
 function getCategory(player: Player): { label: Category; className: string; chipClassName: string } {
   if (player.name.trim().length === 0 || player.nationality.trim().length === 0 || !hasValidDate(player.dateOfBirth)) {
-    return { label: "Review", className: "bg-amber-50 text-amber-700 border-amber-200", chipClassName: "border-amber-300 bg-amber-50 text-amber-800" };
+    return getCategoryStyle("Review");
   }
   if (isU23Exempt(player.dateOfBirth)) {
-    return { label: "U23", className: "bg-emerald-50 text-emerald-700 border-emerald-200", chipClassName: "border-emerald-300 bg-emerald-50 text-emerald-800" };
-  }
-  if (player.needsReview) {
-    return { label: "Review", className: "bg-amber-50 text-amber-700 border-amber-200", chipClassName: "border-amber-300 bg-amber-50 text-amber-800" };
+    return getCategoryStyle("U23");
   }
   if (player.isClubTrained) {
-    return { label: "Club", className: "bg-sky-50 text-sky-700 border-sky-200", chipClassName: "border-sky-300 bg-sky-50 text-sky-800" };
+    return getCategoryStyle("Club");
   }
   if (player.isItalyTrained) {
-    return { label: "Italy", className: "bg-indigo-50 text-indigo-700 border-indigo-200", chipClassName: "border-indigo-300 bg-indigo-50 text-indigo-800" };
+    return getCategoryStyle("Italy");
   }
-  return { label: "Non-HG", className: "bg-slate-100 text-slate-700 border-slate-200", chipClassName: "border-slate-300 bg-white text-slate-800" };
+  if (player.needsReview) {
+    return getCategoryStyle("Review");
+  }
+  return getCategoryStyle("Non-HG");
+}
+
+function getSupplementalCategories(player: Player): Category[] {
+  const primary = getCategory(player).label;
+  const categories: Category[] = [];
+
+  if (player.isClubTrained && primary !== "Club") {
+    categories.push("Club");
+  } else if (player.isItalyTrained && primary !== "Italy" && primary !== "Club") {
+    categories.push("Italy");
+  }
+
+  if (player.needsReview && primary !== "Review") categories.push("Review");
+
+  return categories;
 }
 
 function validateSerieAList(players: Player[]): ValidationResult {
   const registeredRows = players.filter((player) => player.status === "registered");
   const incompleteRegistered = registeredRows.filter(isIncompleteRegistered).length;
   const registered = registeredRows.filter((player) => player.name.trim().length > 0);
-  const senior = registered.filter((player) => !isU23Exempt(player.dateOfBirth));
-  const u23 = registered.filter((player) => isU23Exempt(player.dateOfBirth));
+  const completeRegistered = registered.filter((player) => !isIncompleteRegistered(player));
+  const senior = completeRegistered.filter((player) => !isU23Exempt(player.dateOfBirth));
+  const u23 = completeRegistered.filter((player) => isU23Exempt(player.dateOfBirth));
   const clubTrained = senior.filter((player) => player.isClubTrained).length;
   const italyTrained = senior.filter((player) => player.isClubTrained || player.isItalyTrained).length;
+  const clubTrainedTotal = registered.filter((player) => player.isClubTrained).length;
+  const italyTrainedTotal = registered.filter((player) => player.isClubTrained || player.isItalyTrained).length;
+  const clubTrainedNonSenior = clubTrainedTotal - clubTrained;
+  const italyTrainedNonSenior = italyTrainedTotal - italyTrained;
+  const associationTrained = Math.max(0, italyTrained - clubTrained);
+  const localReservedSlotsFilled = Math.min(8, clubTrained + Math.min(associationTrained, 4));
+  const seniorCapacity = 17 + localReservedSlotsFilled;
+  const unusedReservedSlots = 25 - seniorCapacity;
   const nonHomegrown = senior.length - italyTrained;
-  const nonEuArrivals = registered.filter((player) => player.isNonEuOrEea && player.fromAbroadThisWindow).length;
+  const nonEuArrivals = completeRegistered.filter((player) => player.isNonEuOrEea && player.fromAbroadThisWindow).length;
   const review = registered.filter((player) => player.needsReview || !hasValidDate(player.dateOfBirth) || player.nationality.trim().length === 0).length;
 
   const errors: string[] = [];
   const warnings: string[] = [];
 
-  if (senior.length > 25) errors.push(`Too many senior players: ${senior.length}/25.`);
+  if (senior.length > seniorCapacity) {
+    errors.push(
+      unusedReservedSlots > 0
+        ? `Too many senior players for available reserved slots: ${senior.length}/${seniorCapacity}. ${unusedReservedSlots} reserved senior slot${unusedReservedSlots === 1 ? " is" : "s are"} unused.`
+        : `Too many senior players: ${senior.length}/25.`
+    );
+  }
   if (nonHomegrown > 17) errors.push(`Too many non-homegrown senior players: ${nonHomegrown}/17.`);
-  if (clubTrained < 4) errors.push(`Club-trained quota not met: ${clubTrained}/4.`);
-  if (italyTrained < 8) errors.push(`Italy-trained/homegrown quota not met: ${italyTrained}/8.`);
   if (nonEuArrivals > 2) warnings.push(`${nonEuArrivals} non-EU arrivals from abroad. Check club slots.`);
   if (review > 0) warnings.push(`${review} players need manual eligibility review.`);
   if (incompleteRegistered > 0) warnings.push(`${incompleteRegistered} registered rows have missing player data.`);
@@ -417,7 +481,7 @@ function validateSerieAList(players: Player[]): ValidationResult {
     ok: errors.length === 0,
     errors,
     warnings,
-    counts: { registered: registered.length, senior: senior.length, u23: u23.length, nonHomegrown, clubTrained, italyTrained, nonEuArrivals, review, incompleteRegistered },
+    counts: { registered: registered.length, senior: senior.length, u23: u23.length, nonHomegrown, clubTrained, italyTrained, clubTrainedTotal, italyTrainedTotal, clubTrainedNonSenior, italyTrainedNonSenior, associationTrained, seniorCapacity, unusedReservedSlots, nonEuArrivals, review, incompleteRegistered },
   };
 }
 
@@ -439,6 +503,51 @@ function runSelfTests() {
   expect(catalogPlayerToPlayer({ catalogId: "t2", name: "Italian Senior", dateOfBirth: "1999-01-01", position: "MF", nationality: "ITA", nationalityCode: "ITA", currentClub: "Inter", currentLeague: "Serie A", isNonEuOrEea: false }).isItalyTrained === true, "Italian-nationality imported players should default to Italy-trained for MVP usability.");
   expect(validateSerieAList([]).counts.registered === 0, "Empty list should validate with zero registered players.");
   expect(!isReadyForLineup(makePlayer("", "", "MF", "", false, false, false)), "Blank manual rows should not be ready for lineup.");
+  const manualPlayer = createManualPlayer("test", "DF", "manual-test");
+  expect(manualPlayer.status === "registered", "Manual rows should default to registered so they affect squad-list requirements once completed.");
+  expect(manualPlayer.sourceClub === "Manual" && manualPlayer.needsReview === true, "Manual rows should remain marked as manual-review additions.");
+  const incompleteManualPlayer = { ...manualPlayer, name: "Incomplete Manual", isClubTrained: true, isItalyTrained: true };
+  const incompleteManualValidation = validateSerieAList([incompleteManualPlayer]);
+  expect(incompleteManualValidation.counts.registered === 1, "Named incomplete manual players should appear in the registered row count.");
+  expect(incompleteManualValidation.counts.senior === 0, "Incomplete manual players should not count toward senior quota checks.");
+  expect(incompleteManualValidation.counts.clubTrained === 0, "Incomplete manual players should not satisfy the senior club-trained quota.");
+  const completedManualPlayer = { ...manualPlayer, name: "Manual Senior", dateOfBirth: "1999-01-01", nationality: "Brazil" };
+  const completedManualValidation = validateSerieAList([completedManualPlayer]);
+  expect(completedManualValidation.counts.registered === 1, "Completed manual players should count as registered.");
+  expect(completedManualValidation.counts.senior === 1, "Completed senior manual players should count toward the senior list.");
+  expect(completedManualValidation.counts.nonHomegrown === 1, "Completed manual players without HG flags should count as non-homegrown.");
+  const clubTrainedManualPlayer = { ...completedManualPlayer, isClubTrained: true, isItalyTrained: true };
+  const clubTrainedManualValidation = validateSerieAList([clubTrainedManualPlayer]);
+  expect(getCategory(clubTrainedManualPlayer).label === "Club", "Completed club-trained manual players should show as Club even while marked for review.");
+  expect(clubTrainedManualValidation.counts.clubTrained === 1, "Club-trained manual players should count toward the club-trained requirement.");
+  expect(clubTrainedManualValidation.counts.italyTrained === 1, "Club-trained manual players should also count toward the Italy-trained/homegrown requirement.");
+  expect(clubTrainedManualValidation.counts.nonHomegrown === 0, "Club-trained manual players should not count as non-homegrown.");
+  const u23ClubTrainedManualPlayer = { ...clubTrainedManualPlayer, dateOfBirth: "2006-02-21" };
+  const u23ClubTrainedManualValidation = validateSerieAList([u23ClubTrainedManualPlayer]);
+  expect(getCategory(u23ClubTrainedManualPlayer).label === "U23", "U23 club-trained players should keep U23 as the primary squad-list category.");
+  expect(getSupplementalCategories(u23ClubTrainedManualPlayer).includes("Club"), "U23 club-trained players should still visibly show Club eligibility.");
+  expect(u23ClubTrainedManualValidation.counts.clubTrained === 0, "U23 club-trained players should not fill the senior club-trained quota.");
+  expect(u23ClubTrainedManualValidation.counts.clubTrainedTotal === 1, "U23 club-trained players should still count as club-trained eligibility flags.");
+  expect(u23ClubTrainedManualValidation.counts.clubTrainedNonSenior === 1, "U23 club-trained players should be counted as non-senior C flags.");
+  expect(u23ClubTrainedManualValidation.ok, "Missing senior club-trained slots should not be a standalone validation error.");
+
+  const makeTestSenior = (name: string, isClubTrained = false, isItalyTrained = false) =>
+    makePlayer(name, "1999-01-01", "MF", isItalyTrained ? "Italy" : "Brazil", isClubTrained, isItalyTrained, false);
+  const fullListWithThreeClub = validateSerieAList([
+    ...Array.from({ length: 17 }, (_, index) => makeTestSenior(`Non-HG ${index + 1}`)),
+    ...Array.from({ length: 3 }, (_, index) => makeTestSenior(`Club ${index + 1}`, true, true)),
+    ...Array.from({ length: 5 }, (_, index) => makeTestSenior(`Italy ${index + 1}`, false, true)),
+  ]);
+  expect(fullListWithThreeClub.counts.senior === 25, "Reserved-slot self-test should build a full 25-player senior list.");
+  expect(fullListWithThreeClub.counts.seniorCapacity === 24, "Three club-trained seniors with excess association-trained seniors should reduce senior capacity to 24.");
+  expect(!fullListWithThreeClub.ok, "A 25-player senior list should fail when only 24 reserved slots are available.");
+  expect(fullListWithThreeClub.errors.some((error) => error.includes("25/24")), "Reduced-capacity errors should explain the available senior slots.");
+  const reducedListWithThreeClub = validateSerieAList([
+    ...Array.from({ length: 17 }, (_, index) => makeTestSenior(`Reduced Non-HG ${index + 1}`)),
+    ...Array.from({ length: 3 }, (_, index) => makeTestSenior(`Reduced Club ${index + 1}`, true, true)),
+    ...Array.from({ length: 4 }, (_, index) => makeTestSenior(`Reduced Italy ${index + 1}`, false, true)),
+  ]);
+  expect(reducedListWithThreeClub.ok, "A 24-player senior list should pass with three club-trained seniors if all available slots are respected.");
 
   return failures;
 }
@@ -466,6 +575,81 @@ function Metric({ label, value, danger = false, progress }: { label: string; val
         </div>
       )}
     </div>
+  );
+}
+
+function SidePanel({
+  title,
+  eyebrow,
+  children,
+}: {
+  title: string;
+  eyebrow?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="overflow-hidden rounded-md border border-slate-300 bg-white shadow-sm">
+      <div className="border-b border-slate-200 bg-gradient-to-r from-slate-950 to-slate-800 px-3 py-2 text-white">
+        {eyebrow && <div className="text-[10px] font-black uppercase tracking-[0.16em] text-emerald-200">{eyebrow}</div>}
+        <div className="text-sm font-black">{title}</div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function RailStat({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "good" | "warn" }) {
+  const toneClass = tone === "good"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+    : tone === "warn"
+      ? "border-amber-200 bg-amber-50 text-amber-900"
+      : "border-slate-200 bg-slate-50 text-slate-900";
+
+  return (
+    <div className={`rounded-md border p-2 ${toneClass}`}>
+      <div className="text-[10px] font-black uppercase tracking-wide opacity-65">{label}</div>
+      <div className="mt-1 text-lg font-black leading-none">{value}</div>
+    </div>
+  );
+}
+
+function RailProgress({ label, value, max, danger = false }: { label: string; value: number; max: number; danger?: boolean }) {
+  const progress = max > 0 ? clamp((value / max) * 100, 0, 100) : 0;
+
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-[11px] font-black text-slate-600">
+        <span>{label}</span>
+        <span className={danger ? "text-amber-800" : "text-slate-950"}>{value}/{max}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+        <div className={`h-full rounded-full ${danger ? "bg-amber-500" : "bg-emerald-600"}`} style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function ColumnHelpPanel() {
+  const rows = [
+    ["REG", "Counts in the registration list."],
+    ["Club", "Club-trained eligibility; senior players can fill reserved slots."],
+    ["Italy", "Italy-trained/homegrown eligibility; includes club-trained players."],
+    ["Non-EU", "Non-EU/EEA player flag."],
+    ["Abroad", "Arrived from abroad this window."],
+    ["Review", "Needs manual eligibility check."],
+  ];
+
+  return (
+    <SidePanel title="Column Help" eyebrow="Sheet keys">
+      <div className="divide-y divide-slate-100 p-3 text-xs">
+        {rows.map(([label, description]) => (
+          <div key={label} className="grid grid-cols-[58px_minmax(0,1fr)] gap-2 py-2 first:pt-0 last:pb-0">
+            <span className="rounded border border-slate-200 bg-slate-50 px-2 py-1 text-center font-black text-slate-700">{label}</span>
+            <span className="font-semibold leading-5 text-slate-600">{description}</span>
+          </div>
+        ))}
+      </div>
+    </SidePanel>
   );
 }
 
@@ -583,7 +767,7 @@ function downloadTextFile(fileName: string, content: string, mimeType: string) {
 
 function getExportRows(players: Player[]) {
   return players.map((player) => {
-    const category = getCategory(player).label;
+    const category = [getCategory(player).label, ...getSupplementalCategories(player)].join(" + ");
     return [
       player.status === "registered" ? "REG" : "OUT",
       player.name,
@@ -790,9 +974,11 @@ export default function App() {
     const q = search.trim().toLowerCase();
     const rows = selectedClub.players.filter((player) => {
       const category = getCategory(player).label;
-      const matchesText = !q || `${player.name} ${player.nationality} ${player.position} ${category} ${player.sourceClub}`.toLowerCase().includes(q);
+      const supplementalCategories = getSupplementalCategories(player);
+      const categoryText = [category, ...supplementalCategories].join(" ");
+      const matchesText = !q || `${player.name} ${player.nationality} ${player.position} ${categoryText} ${player.sourceClub}`.toLowerCase().includes(q);
       const matchesPosition = positionFilter === "All" || player.position === positionFilter;
-      const matchesCategory = categoryFilter === "All" || category === categoryFilter;
+      const matchesCategory = categoryFilter === "All" || category === categoryFilter || supplementalCategories.includes(categoryFilter);
       const matchesQuickView =
         quickView === "all" ||
         (quickView === "registered" && player.status === "registered") ||
@@ -954,31 +1140,14 @@ export default function App() {
   }
 
   function addBlankRow() {
-  const id = `manual-${selectedClub.slug}-${Date.now()}`;
+    const defaultPosition: Position = positionFilter === "All" ? "MF" : positionFilter;
 
-  const defaultPosition: Position =
-    positionFilter === "All" ? "MF" : positionFilter;
+    setSearch("");
+    setCategoryFilter("All");
+    setQuickView("all");
 
-  setSearch("");
-
-  updateSelectedPlayers((players) => [
-    ...players,
-    {
-      id,
-      name: "",
-      dateOfBirth: "",
-      position: defaultPosition,
-      nationality: "",
-      isClubTrained: false,
-      isItalyTrained: false,
-      isNonEuOrEea: false,
-      fromAbroadThisWindow: false,
-      status: "not_registered",
-      sourceClub: "Manual",
-      needsReview: true,
-    },
-  ]);
-}
+    updateSelectedPlayers((players) => [...players, createManualPlayer(selectedClub.slug, defaultPosition)]);
+  }
 
   function addTransfer(player: Player) {
     updateSelectedPlayers((players) => [
@@ -1155,11 +1324,11 @@ export default function App() {
             <Metric label="Club" value={selectedClub.shortName} />
             <Metric label="Rows" value={`${filteredPlayers.length}`} />
             <Metric label="Registered" value={`${validation.counts.registered}`} progress={(validation.counts.registered / 25) * 100} />
-            <Metric label="Senior" value={`${validation.counts.senior}/25`} danger={validation.counts.senior > 25} progress={(validation.counts.senior / 25) * 100} />
+            <Metric label="Senior" value={`${validation.counts.senior}/${validation.counts.seniorCapacity}`} danger={validation.counts.senior > validation.counts.seniorCapacity} progress={(validation.counts.senior / validation.counts.seniorCapacity) * 100} />
             <Metric label="U23" value={`${validation.counts.u23}`} />
             <Metric label="Non-HG" value={`${validation.counts.nonHomegrown}/17`} danger={validation.counts.nonHomegrown > 17} progress={(validation.counts.nonHomegrown / 17) * 100} />
-            <Metric label="Club Trained" value={`${validation.counts.clubTrained}/4`} danger={validation.counts.clubTrained < 4} progress={(validation.counts.clubTrained / 4) * 100} />
-            <Metric label="Italy Trained" value={`${validation.counts.italyTrained}/8`} danger={validation.counts.italyTrained < 8} progress={(validation.counts.italyTrained / 8) * 100} />
+            <Metric label="Senior Club" value={`${validation.counts.clubTrained} C`} />
+            <Metric label="Senior Local" value={`${validation.counts.italyTrained} HG`} />
           </div>
         </section>
 
@@ -1244,6 +1413,7 @@ export default function App() {
                   <tbody>
                     {filteredPlayers.map((player, index) => {
                       const category = getCategory(player);
+                      const supplementalCategories = getSupplementalCategories(player);
                       const addition = isWorkbookAddition(player, selectedClub);
                       const isSelected = selectedPlayerIds.includes(player.id);
 
@@ -1288,7 +1458,15 @@ export default function App() {
                               <label title="Needs review" className="cursor-pointer">R<CheckboxCell checked={Boolean(player.needsReview)} onChange={(checked) => updatePlayer(player.id, { needsReview: checked })} /></label>
                             </div>
                           </td>
-                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle"><Badge className={category.className}>{category.label}</Badge></td>
+                          <td className="border border-slate-200 px-1 py-0.5 text-center align-middle">
+                            <div className="flex flex-wrap justify-center gap-1">
+                              <Badge className={category.className}>{category.label}</Badge>
+                              {supplementalCategories.map((label) => {
+                                const supplementalCategory = getCategoryStyle(label);
+                                return <Badge key={label} className={supplementalCategory.className}>{label}</Badge>;
+                              })}
+                            </div>
+                          </td>
                           <td className="truncate border border-slate-200 px-1 py-0.5 align-middle text-[10px] font-bold text-slate-500" title={player.sourceClub}>{player.sourceClub}</td>
                           <td className="border border-slate-200 px-1 py-0.5 text-center align-middle">
                             <button onClick={() => removePlayer(player.id)} className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-black text-red-700 hover:bg-red-100">Del</button>
@@ -1310,20 +1488,8 @@ export default function App() {
               </div>
             </div>
 
-            <aside className="space-y-3">
-              <section className="border border-slate-300 bg-white shadow-sm">
-                <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Column help</div>
-                <div className="space-y-1 p-3 text-xs text-slate-700">
-                  <div><b>REG</b>: counts in the registration list.</div>
-                  <div><b>Club</b>: club-trained quota.</div>
-                  <div><b>Italy</b>: Italy-trained/homegrown quota.</div>
-                  <div><b>Non-EU</b>: non-EU/EEA player.</div>
-                  <div><b>Abroad</b>: arrived from abroad this window.</div>
-                  <div><b>Review</b>: needs manual eligibility check.</div>
-                  <div><b>Amber/red rows</b>: review or missing data.</div>
-                </div>
-              </section>
-
+            <aside className="space-y-3 xl:sticky xl:top-28">
+              <ColumnHelpPanel />
               <SquadInsightPanel
                 validation={validation}
                 positionCounts={squadPositionCounts}
@@ -1331,15 +1497,16 @@ export default function App() {
                 duplicateNameCount={duplicateNameCount}
               />
               <RulesPanel validation={validation} />
-              <section className="border border-slate-300 bg-white shadow-sm">
-                <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Player pool</div>
-                <div className="p-3 text-xs text-slate-600">
-                  <p className="mb-3">Search the bundled player database in a drawer so the workbook stays focused.</p>
-                  <button type="button" onClick={() => setIsTransferPanelOpen(true)} className="w-full border border-green-700 bg-green-700 px-3 py-2 text-xs font-black text-white hover:bg-green-800">
+              <SidePanel title="Player Pool" eyebrow="Additions">
+                <div className="space-y-3 p-3 text-xs text-slate-600">
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 font-semibold leading-5 text-emerald-950">
+                    Search the bundled database, add a player to this sheet, then review the eligibility flags.
+                  </div>
+                  <button type="button" onClick={() => setIsTransferPanelOpen(true)} className="h-10 w-full rounded-md border border-green-700 bg-green-700 px-3 text-xs font-black text-white shadow-sm hover:bg-green-800">
                     Open player pool
                   </button>
                 </div>
-              </section>
+              </SidePanel>
             </aside>
           </section>
         ) : activeTab === "lineup" ? (
@@ -1488,25 +1655,42 @@ export default function App() {
 
 function RulesPanel({ validation }: { validation: ValidationResult }) {
   return (
-    <section className="border border-slate-300 bg-white shadow-sm">
-      <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Rules / Checks</div>
-      <div className="p-3 text-sm">
-        <div className="mb-3"><StatusCell ok={validation.ok} /></div>
-        <ul className="space-y-1 text-slate-700">
-          <li><b>25</b> max senior registered players</li>
-          <li><b>17</b> max non-homegrown senior players</li>
-          <li><b>4</b> min club-trained senior players</li>
-          <li><b>8</b> min Italy-trained/homegrown senior players</li>
-          <li><b>U23</b> players are exempt</li>
-        </ul>
+    <SidePanel title="Rules / Checks" eyebrow="Validation">
+      <div className="space-y-3 p-3 text-sm">
+        <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50 p-2">
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-wide text-slate-400">Sheet status</div>
+            <div className="text-xs font-bold text-slate-600">Reserved slots lower capacity when unfilled.</div>
+          </div>
+          <StatusCell ok={validation.ok} />
+        </div>
+
+        <div className="space-y-2">
+          <RailProgress label="Senior capacity" value={validation.counts.senior} max={validation.counts.seniorCapacity} danger={validation.counts.senior > validation.counts.seniorCapacity} />
+          <RailProgress label="Non-HG senior slots" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <RailStat label="Senior C" value={`${validation.counts.clubTrained}`} />
+          <RailStat label="Local HG" value={`${validation.counts.italyTrained}`} />
+          <RailStat label="U23" value={`${validation.counts.u23}`} />
+          <RailStat label="Review" value={`${validation.counts.review}`} tone={validation.counts.review > 0 ? "warn" : "good"} />
+        </div>
+
+        <div className="rounded-md border border-slate-200 bg-white p-3 text-xs font-semibold leading-5 text-slate-600">
+          <div><b>25</b> senior places only when every reserved slot is usable.</div>
+          <div><b>17</b> non-homegrown/free senior places.</div>
+          <div><b>C</b> and <b>I</b> can be shown on U23 players without filling senior slots.</div>
+        </div>
+
         {(validation.errors.length > 0 || validation.warnings.length > 0) && (
-          <div className="mt-3 space-y-2">
-            {validation.errors.map((error) => <div key={error} className="border border-amber-300 bg-amber-50 p-2 text-xs font-bold text-amber-800">{error}</div>)}
-            {validation.warnings.map((warning) => <div key={warning} className="border border-slate-300 bg-slate-50 p-2 text-xs font-bold text-slate-700">{warning}</div>)}
+          <div className="space-y-2">
+            {validation.errors.map((error) => <div key={error} className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs font-bold text-amber-800">{error}</div>)}
+            {validation.warnings.map((warning) => <div key={warning} className="rounded-md border border-slate-300 bg-slate-50 p-2 text-xs font-bold text-slate-700">{warning}</div>)}
           </div>
         )}
       </div>
-    </section>
+    </SidePanel>
   );
 }
 
@@ -1521,43 +1705,56 @@ function SquadInsightPanel({
   averageAge: string;
   duplicateNameCount: number;
 }) {
-  const seniorSlotsLeft = Math.max(0, 25 - validation.counts.senior);
+  const seniorSlotsLeft = Math.max(0, validation.counts.seniorCapacity - validation.counts.senior);
   const nonHgSlotsLeft = Math.max(0, 17 - validation.counts.nonHomegrown);
-  const clubNeeded = Math.max(0, 4 - validation.counts.clubTrained);
-  const italyNeeded = Math.max(0, 8 - validation.counts.italyTrained);
 
   return (
-    <section className="border border-slate-300 bg-white shadow-sm">
-      <div className="border-b border-slate-300 bg-slate-100 px-3 py-2 text-sm font-black">Squad insight</div>
-      <div className="grid grid-cols-2 border-b border-slate-200 text-xs">
-        <div className="border-r border-slate-200 p-3">
-          <div className="font-black uppercase tracking-wide text-slate-400">Avg age</div>
-          <div className="mt-1 text-lg font-black text-slate-950">{averageAge}</div>
+    <SidePanel title="Squad Insight" eyebrow="Capacity">
+      <div className="space-y-3 p-3">
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <RailStat label="Avg age" value={averageAge} />
+          <RailStat label="Room" value={`${seniorSlotsLeft}`} tone={validation.counts.senior > validation.counts.seniorCapacity ? "warn" : "good"} />
+          <RailStat label="Non-HG left" value={`${nonHgSlotsLeft}`} tone={validation.counts.nonHomegrown > 17 ? "warn" : "neutral"} />
         </div>
-        <div className="p-3">
-          <div className="font-black uppercase tracking-wide text-slate-400">Senior room</div>
-          <div className="mt-1 text-lg font-black text-slate-950">{seniorSlotsLeft}</div>
+
+        <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+          <RailProgress label="Senior capacity" value={validation.counts.senior} max={validation.counts.seniorCapacity} danger={validation.counts.senior > validation.counts.seniorCapacity} />
+          <RailProgress label="Non-HG usage" value={validation.counts.nonHomegrown} max={17} danger={validation.counts.nonHomegrown > 17} />
         </div>
-      </div>
-      <div className="grid grid-cols-4 border-b border-slate-200 text-center text-xs font-black">
+
+      <div className="grid grid-cols-4 overflow-hidden rounded-md border border-slate-200 text-center text-xs font-black">
         {(["GK", "DF", "MF", "FW"] as Position[]).map((position) => (
-          <div key={position} className="border-r border-slate-200 p-2 last:border-r-0">
+          <div key={position} className="border-r border-slate-200 bg-white p-2 last:border-r-0">
             <div className="text-slate-400">{position}</div>
             <div className="text-slate-950">{positionCounts[position]}</div>
           </div>
         ))}
       </div>
-      <div className="space-y-2 p-3 text-xs">
-        <div className={clubNeeded > 0 ? "font-bold text-amber-800" : "font-bold text-emerald-800"}>
-          Club-trained: {clubNeeded > 0 ? `${clubNeeded} more needed` : "quota covered"}
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <RailStat label="Senior C" value={`${validation.counts.clubTrained}`} />
+          <RailStat label="Senior local" value={`${validation.counts.italyTrained}`} />
+          <RailStat label="All C flags" value={`${validation.counts.clubTrainedTotal}`} />
+          <RailStat label="All I flags" value={`${validation.counts.italyTrainedTotal}`} />
         </div>
-        <div className={italyNeeded > 0 ? "font-bold text-amber-800" : "font-bold text-emerald-800"}>
-          Italy-trained: {italyNeeded > 0 ? `${italyNeeded} more needed` : "quota covered"}
+
+        <div className="rounded-md border border-slate-200 bg-white p-3 text-xs font-semibold leading-5 text-slate-600">
+          Italy-only senior players: <b>{validation.counts.associationTrained}</b>. Non-HG senior slots left: <b>{nonHgSlotsLeft}</b>.
         </div>
-        <div className="font-bold text-slate-700">Non-HG senior slots left: {nonHgSlotsLeft}</div>
-        {duplicateNameCount > 0 && <div className="border border-amber-300 bg-amber-50 p-2 font-bold text-amber-800">{duplicateNameCount} duplicate player name group(s) found.</div>}
+
+        {validation.counts.unusedReservedSlots > 0 && (
+          <div className="rounded-md border border-slate-300 bg-slate-50 p-2 text-xs font-bold text-slate-700">
+            {validation.counts.unusedReservedSlots} reserved senior slot{validation.counts.unusedReservedSlots === 1 ? " is" : "s are"} unused. This lowers capacity; it is not a failed quota.
+          </div>
+        )}
+        {(validation.counts.clubTrainedNonSenior > 0 || validation.counts.italyTrainedNonSenior > 0) && (
+          <div className="rounded-md border border-slate-300 bg-slate-50 p-2 text-xs font-bold text-slate-700">
+            Non-senior flags shown on the sheet: {validation.counts.clubTrainedNonSenior} C, {validation.counts.italyTrainedNonSenior} I.
+          </div>
+        )}
+        {duplicateNameCount > 0 && <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs font-bold text-amber-800">{duplicateNameCount} duplicate player name group(s) found.</div>}
       </div>
-    </section>
+    </SidePanel>
   );
 }
 
@@ -1596,8 +1793,8 @@ function LeagueOverview({
               <th className="border border-slate-300 px-2 py-2">Senior</th>
               <th className="border border-slate-300 px-2 py-2">U23</th>
               <th className="border border-slate-300 px-2 py-2">Non-HG</th>
-              <th className="border border-slate-300 px-2 py-2">Club</th>
-              <th className="border border-slate-300 px-2 py-2">Italy</th>
+              <th className="border border-slate-300 px-2 py-2">Senior C</th>
+              <th className="border border-slate-300 px-2 py-2">Local</th>
               <th className="border border-slate-300 px-2 py-2">Review</th>
               <th className="border border-slate-300 px-2 py-2">Open</th>
             </tr>
@@ -1611,11 +1808,11 @@ function LeagueOverview({
                 </td>
                 <td className="border border-slate-200 px-2 py-2 text-center"><StatusCell ok={validation.ok} /></td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.registered}</td>
-                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.senior > 25 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.senior}/25</td>
+                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.senior > validation.counts.seniorCapacity ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.senior}/{validation.counts.seniorCapacity}</td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.u23}</td>
                 <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.nonHomegrown > 17 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.nonHomegrown}/17</td>
-                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.clubTrained < 4 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.clubTrained}/4</td>
-                <td className={`border border-slate-200 px-2 py-2 text-center font-bold ${validation.counts.italyTrained < 8 ? "bg-amber-50 text-amber-800" : ""}`}>{validation.counts.italyTrained}/8</td>
+                <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.clubTrained} C</td>
+                <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.italyTrained} HG</td>
                 <td className="border border-slate-200 px-2 py-2 text-center font-bold">{validation.counts.review}</td>
                 <td className="border border-slate-200 px-2 py-2 text-center">
                   <button type="button" onClick={() => onOpenClub(club.slug)} className="border border-green-700 bg-green-700 px-3 py-1.5 text-xs font-black text-white hover:bg-green-800">Open</button>
